@@ -83,6 +83,8 @@ func NewWindowsClient(addr string, port int, whiteList []string, CIDR string) *C
 	return &Client{
 		WhiteList: whiteList,
 		Interface: adapter,
+		Stopping:  make(chan struct{}),
+		Ping:      NewPing(10 * time.Second),
 		Endpoint:  *NewEndpoint(addr, port, CIDR),
 	}
 }

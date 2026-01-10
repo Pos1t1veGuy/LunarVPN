@@ -2,6 +2,7 @@ package core
 
 import (
 	"bytes"
+	"errors"
 	"fmt"
 	"io"
 	stdlog "log"
@@ -11,6 +12,7 @@ import (
 	"runtime"
 	"strconv"
 	"strings"
+	"sync"
 	"time"
 
 	"github.com/rs/zerolog"
@@ -48,23 +50,25 @@ func NewEndpoint(addr string, port int, CIDR string) *Endpoint {
 	}
 }
 
-func ConfigTunnel(destinationIP string, netCidr string, interfaceIP string, IfaceName string, whitelist []string) {
+func ConfigTunnel(destinationIP string, netCidr string, interfaceIP string, IfaceName string, whitelist []string) error {
 	ip, ipNet, err := net.ParseCIDR(netCidr)
 	if err != nil {
-		log.Fatal().
+		log.Error().
 			Err(err).
 			Str("state", "configTunnel").
 			Str("CIDR", netCidr).
 			Msg("Failed to parse CIDR")
+		return err
 	}
 
 	// getting interfaces info
 	defIfaceName, defIfaceIP, defIfaceIndex, err := getDefaultInterface()
 	if err != nil {
-		log.Fatal().
+		log.Error().
 			Err(err).
 			Str("state", "configTunnel").
 			Msg("Failed to get default interface")
+		return err
 	}
 	log.Debug().
 		Str("state", "configTunnel").
@@ -74,11 +78,12 @@ func ConfigTunnel(destinationIP string, netCidr string, interfaceIP string, Ifac
 		Msg("Default adapter info")
 	curIface, err := net.InterfaceByName(IfaceName)
 	if err != nil {
-		log.Fatal().
+		log.Error().
 			Err(err).
 			Str("state", "configTunnel").
 			Str("ifaceName", IfaceName).
 			Msg("Failed to get VPN interface")
+		return err
 	}
 	log.Debug().
 		Str("state", "configTunnel").
@@ -112,11 +117,12 @@ func ConfigTunnel(destinationIP string, netCidr string, interfaceIP string, Ifac
 
 		//ExecCmd("ip", "route", "add", "1.1.1.1", "dev", IfaceName) // dns
 	case "darwin":
-		log.Fatal().
+		log.Error().
 			Err(err).
 			Str("state", "configTunnel").
 			Str("CIDR", netCidr).
-			Msg("Failed to parse CIDR")
+			Msg("Darwin not yet supported")
+		return errors.New("darwin not yet supported")
 	case "windows":
 		ifaceMask := net.IP(ipNet.Mask).String()
 		gatewayIP := ip.String()
@@ -155,8 +161,9 @@ func ConfigTunnel(destinationIP string, netCidr string, interfaceIP string, Ifac
 		//	fmt.Sprintf("static=%d", ip.String()))
 
 	default:
-		log.Printf("not support os:%v", runtime.GOOS)
+		return fmt.Errorf("not support os:%v", runtime.GOOS)
 	}
+	return nil
 }
 
 func ExecCmd(c string, args ...string) string {
@@ -232,6 +239,17 @@ func (adapter *DefaultAdapter) Index() int {
 	return adapter.IfaceIndex
 }
 
+type SyncWriter struct {
+	mu sync.Mutex
+	w  io.Writer
+}
+
+func (s *SyncWriter) Write(p []byte) (n int, err error) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	return s.w.Write(p)
+}
+
 func InitLogger(levelStr string) {
 	stdlog.SetOutput(io.Discard)
 	zerolog.TimeFieldFormat = time.RFC3339
@@ -242,11 +260,12 @@ func InitLogger(levelStr string) {
 	}
 
 	zerolog.SetGlobalLevel(level)
-
-	log.Logger = log.Output(zerolog.ConsoleWriter{
+	cw := zerolog.ConsoleWriter{
 		Out:        os.Stdout,
 		TimeFormat: "15:04:05",
-	})
+	}
+
+	log.Logger = log.Output(&SyncWriter{w: cw})
 	if err != nil {
 		log.Error().Err(err).Msg("Failed to parse log level")
 	}

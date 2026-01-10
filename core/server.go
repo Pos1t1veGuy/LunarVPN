@@ -3,7 +3,10 @@ package core
 import (
 	"fmt"
 	"net"
+	"os"
+	"os/signal"
 	"sync"
+	"syscall"
 	"time"
 
 	"github.com/google/gopacket"
@@ -39,6 +42,8 @@ func NewPeer(virtualIP net.IP, addr *net.UDPAddr, handshaked bool) *Peer {
 }
 
 func (server *Server) Start() {
+	sigs := make(chan os.Signal, 1)
+	signal.Notify(sigs, syscall.SIGINT, syscall.SIGTERM)
 	log.Info().
 		Str("state", "starting").
 		Str("serverAddr", server.FullAddr).
@@ -77,14 +82,18 @@ func (server *Server) Start() {
 		Str("addr", server.FullAddr).
 		Msg("VPN server listening")
 
-	ConfigTunnel("", server.CIDR, interfaceIP.String(), "gotun0", []string{})
+	err = ConfigTunnel("", server.CIDR, interfaceIP.String(), "gotun0", []string{})
+	if err != nil {
+		return
+	}
 
 	log.Info().
 		Str("state", "starting").
 		Str("serverAddr", server.FullAddr).
 		Msg("Tunnel started")
 
-	go func() { // udp <= interface
+	// udp <= interface
+	go func() {
 		buffer := make([]byte, 1500)
 		var key string
 		for {
@@ -122,8 +131,8 @@ func (server *Server) Start() {
 							Msg("(UDP<=Interface) Failed to marshal packet")
 						continue
 					}
-					_, err = server.Conn.WriteToUDP(bytes, v.(*net.UDPAddr))
-					if err != nil {
+
+					if _, err = server.Conn.WriteToUDP(bytes, v.(*net.UDPAddr)); err != nil {
 						log.Debug().
 							Str("state", "I2U").
 							Int("len", n).
@@ -168,83 +177,108 @@ func (server *Server) Start() {
 	}()
 
 	// udp => interface
-	buf := make([]byte, 1500)
-	for {
-		n, clientAddr, err := server.Conn.ReadFromUDP(buf)
-		if err != nil || n == 0 {
-			log.Printf("udp read error: %v", err)
-			continue
-		}
-		var version int
-		if clientAddr.IP.To4() != nil {
-			version = 4
-		} else {
-			version = 6
-		}
+	go func() {
+		buf := make([]byte, 1500)
+		for {
+			n, clientAddr, err := server.Conn.ReadFromUDP(buf)
+			if err != nil || n == 0 {
+				log.Printf("udp read error: %v", err)
+				continue
+			}
+			var version int
+			if clientAddr.IP.To4() != nil {
+				version = 4
+			} else {
+				version = 6
+			}
 
-		if _, found := server.Cache.Get(clientAddr.String()); !found {
+			// auth
+			if _, found := server.Cache.Get(clientAddr.String()); !found {
 
-			peer, err := server.Handshake(n, buf, clientAddr)
-			if err != nil || !peer.Handshaked {
-				log.Debug().
-					Err(err).
+				peer, err := server.Handshake(n, buf, clientAddr)
+				if err != nil || !peer.Handshaked {
+					log.Debug().
+						Err(err).
+						Int("len", n).
+						Str("state", "U2I").
+						Int("addrType", version).
+						Str("peerIP", clientAddr.String()).
+						Msg("(UDP=>Interface) Handshake failed")
+					continue
+				}
+
+				server.Cache.Set(
+					clientAddr.String(),
+					clientAddr,
+					cache.DefaultExpiration,
+				)
+
+				log.Info().
 					Int("len", n).
 					Str("state", "U2I").
 					Int("addrType", version).
 					Str("peerIP", clientAddr.String()).
-					Msg("(UDP=>Interface) Handshake failed")
+					Msg("(UDP=>Interface) Handshake success")
 				continue
 			}
 
-			server.Cache.Set(
-				clientAddr.String(),
-				clientAddr,
-				cache.DefaultExpiration,
-			)
+			packet, err := UnmarshalPacket(buf[:n])
+			if !server.PacketAPI(*server.Conn, *clientAddr, packet) {
+				if err != nil || packet.AddrType != 4 {
+					log.Debug().
+						Err(err).
+						Int("len", n).
+						Str("state", "U2I").
+						Int("addrType", version).
+						Msg("(UDP=>Interface) Failed to marshal packet")
+					continue
+				}
+
+				if _, err := server.Interface.Write(packet.Data); err != nil {
+					log.Debug().
+						Err(err).
+						Int("len", n).
+						Str("state", "U2I").
+						Int("addrType", version).
+						Str("srcIP", packet.SrcIP.String()).
+						Str("dstIP", packet.DstIP.String()).
+						Msg("(UDP=>Interface) Sent a packet")
+				} else {
+					log.Debug().
+						Err(err).
+						Int("len", n).
+						Str("state", "U2I").
+						Int("addrType", version).
+						Str("srcIP", packet.SrcIP.String()).
+						Str("dstIP", packet.DstIP.String()).
+						Msg("(UDP=>Interface) Failed to send packet")
+				}
+			} else {
+				log.Debug().
+					Int("len", n).
+					Str("state", "U2I").
+					Int("addrType", version).
+					Str("srcIP", packet.SrcIP.String()).
+					Str("dstIP", packet.DstIP.String()).
+					Msg("(UDP=>Interface) Got API packet")
+			}
+
+			key := fmt.Sprintf("%v=>%v", packet.SrcIP, packet.DstIP)
+			server.Cache.Set(key, clientAddr, cache.DefaultExpiration)
+		}
+	}()
+
+	<-sigs // waiting for Ctrl+C
+	for _, peer := range server.Peers {
+		if peer != nil && peer.Addr != nil {
+			SendPacket(server.Conn, MakeDisconnectPacket(server.IP, peer.Addr.IP))
 
 			log.Info().
-				Int("len", n).
-				Str("state", "U2I").
-				Int("addrType", version).
-				Str("peerIP", clientAddr.String()).
-				Msg("(UDP=>Interface) Handshake success")
-			continue
+				Str("peer", peer.Addr.String()).
+				Msg("disconnect packet sent")
 		}
-
-		packet, err := UnmarshalPacket(buf[:n])
-		if err != nil || packet.AddrType != 4 {
-			log.Debug().
-				Err(err).
-				Int("len", n).
-				Str("state", "U2I").
-				Int("addrType", version).
-				Msg("(UDP=>Interface) Failed to marshal packet")
-			continue
-		}
-
-		if _, err := server.Interface.Write(packet.Data); err != nil {
-			log.Debug().
-				Err(err).
-				Int("len", n).
-				Str("state", "U2I").
-				Int("addrType", version).
-				Str("srcIP", packet.SrcIP.String()).
-				Str("dstIP", packet.DstIP.String()).
-				Msg("(UDP=>Interface) Sent a packet")
-		} else {
-			log.Debug().
-				Err(err).
-				Int("len", n).
-				Str("state", "U2I").
-				Int("addrType", version).
-				Str("srcIP", packet.SrcIP.String()).
-				Str("dstIP", packet.DstIP.String()).
-				Msg("(UDP=>Interface) Failed to send packet")
-		}
-
-		key := fmt.Sprintf("%v=>%v", packet.SrcIP, packet.DstIP)
-		server.Cache.Set(key, clientAddr, cache.DefaultExpiration)
 	}
+	log.Info().Msg("Server closed")
 }
 
 type Network struct {

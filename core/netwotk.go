@@ -5,6 +5,10 @@ import (
 	"errors"
 	"fmt"
 	"net"
+	"sync"
+	"time"
+
+	"github.com/rs/zerolog/log"
 )
 
 func (client *Client) Handshake() (net.IP, error) {
@@ -124,4 +128,171 @@ func UnmarshalPacket(data []byte) (*Packet, error) {
 	p.Data = data[offset:]
 
 	return p, nil
+}
+
+func SendPacket(conn *net.UDPConn, packet *Packet) {
+	bytes, err := MarshalPacket(packet)
+	if err != nil {
+		log.Debug().
+			Err(err).
+			Str("state", "serverCommand").
+			Int("len", len(bytes)).
+			Int("AddrType", int(packet.AddrType)).
+			Msg("(UDP<=Interface) Failed to marshal packet")
+	}
+	if _, err = conn.Write(bytes); err != nil {
+		log.Debug().
+			Err(err).
+			Str("state", "serverCommand").
+			Int("len", len(bytes)).
+			Int("AddrType", int(packet.AddrType)).
+			Msg("(UDP<=Interface) Failed to send packet")
+	} else {
+		log.Debug().
+			Str("state", "serverCommand").
+			Int("len", len(bytes)).
+			Int("AddrType", int(packet.AddrType)).
+			Msg("(UDP<=Interface) Sent a packet")
+	}
+}
+
+func (server *Server) PacketAPI(conn net.UDPConn, clientAddr net.UDPAddr, packet *Packet) bool {
+	if packet.Type == 1 {
+		strClientAddr := clientAddr.String()
+
+		switch packet.Rsv {
+		case [4]byte{0, 0, 0, 0}: // disconnect
+			server.mu.Lock()
+			if _, exists := server.Peers[strClientAddr]; exists {
+				delete(server.Peers, strClientAddr)
+				log.Info().
+					Str("state", "API").
+					Str("peer", strClientAddr).
+					Str("localIP", packet.SrcIP.String()).
+					Msg("Peer disconnected")
+			} else {
+				log.Info().
+					Str("state", "API").
+					Str("peer", strClientAddr).
+					Str("localIP", packet.SrcIP.String()).
+					Msg("Peer not found")
+			}
+			server.mu.Unlock()
+
+		case [4]byte{0, 0, 0, 1}: // ping
+			bytes, err := MarshalPacket(MakePingPacket(server.IP, clientAddr.IP))
+			if err != nil {
+				log.Debug().
+					Err(err).
+					Str("state", "API").
+					Str("dstAddr", strClientAddr).
+					Msg("Failed to marshal packet")
+			}
+			if _, err := conn.WriteToUDP(bytes, &clientAddr); err != nil {
+				log.Debug().
+					Err(err).
+					Str("state", "API").
+					Str("dstAddr", strClientAddr).
+					Msg("Failed to send packet")
+			} else {
+				log.Debug().
+					Str("state", "API").
+					Str("dstAddr", strClientAddr).
+					Msg("Sent a packet")
+			}
+		}
+		return true
+	}
+	return false
+}
+
+func (client *Client) PacketAPI(conn net.UDPConn, serverAddr net.UDPAddr, packet *Packet) bool {
+	if packet.Type == 1 {
+		switch packet.Rsv {
+		case [4]byte{0, 0, 0, 0}: // disconnect
+			client.Stop("Server disconnected you")
+		case [4]byte{0, 0, 0, 1}: // pong
+			client.Ping.Calculate()
+		}
+		return true
+	}
+	return false
+}
+
+func MakeDisconnectPacket(serverAddr net.IP, clientAddr net.IP) *Packet {
+	var version int
+	if serverAddr.To4() != nil {
+		version = 4
+	} else {
+		version = 6
+	}
+	return &Packet{
+		Type:     1,
+		AddrType: byte(version),
+		SrcIP:    clientAddr,
+		DstIP:    serverAddr,
+		Rsv:      [4]byte{0, 0, 0, 0},
+		Length:   0,
+		Data:     nil,
+	}
+}
+
+func MakePingPacket(srcIP net.IP, dstIP net.IP) *Packet {
+	var version int
+	if dstIP.To4() != nil {
+		version = 4
+	} else {
+		version = 6
+	}
+	return &Packet{
+		Type:     1,
+		AddrType: byte(version),
+		SrcIP:    srcIP,
+		DstIP:    dstIP,
+		Rsv:      [4]byte{0, 0, 0, 1},
+		Length:   0,
+		Data:     nil,
+	}
+}
+
+type Ping struct {
+	TimeStart  time.Time
+	Calculated bool
+	Value      time.Duration
+	Threshold  time.Duration
+	Response   bool
+
+	mu sync.Mutex
+}
+
+func NewPing(threshold time.Duration) *Ping {
+	return &Ping{Threshold: threshold}
+}
+func (ping *Ping) Start() {
+	ping.mu.Lock()
+	ping.Calculated = false
+	ping.TimeStart = time.Now()
+	ping.Value = 0 * time.Second
+	ping.mu.Unlock()
+
+	go func() {
+		timer := time.NewTimer(5 * time.Second)
+		defer timer.Stop()
+
+		<-timer.C
+
+		ping.mu.Lock()
+		defer ping.mu.Unlock()
+
+		if !ping.Calculated {
+			ping.Response = false
+		}
+	}()
+}
+func (ping *Ping) Calculate() time.Duration {
+	ping.mu.Lock()
+	defer ping.mu.Unlock()
+	ping.Calculated = true
+	ping.Value = time.Since(ping.TimeStart)
+	return ping.Value
 }

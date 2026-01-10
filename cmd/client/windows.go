@@ -33,4 +33,5 @@ func main() {
 	core.InitLogger(*logLevel)
 	cl := core.NewWindowsClient(*appHost, *appPort, []string{}, "10.0.0.1/24")
 	cl.Connect(*serHost, *serPort)
+	cl.Listen()
 }
