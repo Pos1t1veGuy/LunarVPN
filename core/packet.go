@@ -24,7 +24,6 @@ func (packet *Packet) Len() int {
 	return len(packet.Data)
 }
 
-// TODO: заменить на makedeafultpacket то что внутри клиента
 func MarshalPacket(p *Packet) ([]byte, error) {
 	buf := []byte{p.Type, p.AddrType}
 
