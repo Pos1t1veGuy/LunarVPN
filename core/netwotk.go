@@ -1,7 +1,6 @@
 package core
 
 import (
-	"encoding/binary"
 	"errors"
 	"fmt"
 	"net"
@@ -12,7 +11,10 @@ import (
 )
 
 func (client *Client) Handshake() (net.IP, error) {
-	packet := MakeDefaultPacket(net.ParseIP("0.0.0.0"), client.ServerAddr.IP, []byte{0x01, 0x01})
+	packet, err := MakeDefaultPacket(net.ParseIP("0.0.0.0"), client.ServerAddr.IP, []byte{0x01, 0x01})
+	if err != nil {
+		return nil, err
+	}
 	clientHello, err := MarshalPacket(packet)
 
 	if err != nil {
@@ -65,7 +67,10 @@ func (server *Server) Handshake(n int, buf []byte, addr *net.UDPAddr) (*Peer, er
 			return server.AnonymousPeer, fmt.Errorf("get next virtual ip failed: %v", err)
 		}
 
-		packetResp := MakeDefaultPacket(server.IP, virtualIP, []byte{0x02, 0x00})
+		packetResp, err := MakeDefaultPacket(server.IP, virtualIP, []byte{0x02, 0x00})
+		if err != nil {
+			return server.AnonymousPeer, fmt.Errorf("can not make a new packet: %v", err)
+		}
 		resp, err := MarshalPacket(packetResp)
 		if err != nil {
 			return server.AnonymousPeer, fmt.Errorf("marshal packet failed: %v", err)
@@ -82,101 +87,6 @@ func (server *Server) Handshake(n int, buf []byte, addr *net.UDPAddr) (*Peer, er
 		return server.Peers[addr.String()], nil
 	}
 	return server.AnonymousPeer, errors.New("not a handshake")
-}
-
-// [PacketType:1][AddrType:1][SrcIP:4/16][DstIP:4/16][Rst:4][Length:2][Data:N]
-type Packet struct {
-	Type     byte   // (0 - default data packet, 1 - api packet, 2 - keepalive)
-	AddrType byte   // (4 - IPv4, 6 - IPv6)
-	SrcIP    net.IP // 4 or 16 bytes
-	DstIP    net.IP // 4 or 16 bytes
-	Rsv      [4]byte
-	Length   uint16
-	Data     []byte
-}
-
-func (packet *Packet) Len() int {
-	return len(packet.Data)
-}
-
-func MarshalPacket(p *Packet) ([]byte, error) {
-	buf := []byte{p.Type, p.AddrType}
-
-	if p.AddrType == 4 {
-		buf = append(buf, p.SrcIP.To4()...)
-		buf = append(buf, p.DstIP.To4()...)
-	} else if p.AddrType == 6 {
-		buf = append(buf, p.SrcIP.To16()...)
-		buf = append(buf, p.DstIP.To16()...)
-	} else {
-		return nil, fmt.Errorf("unknown address type: %v", p.AddrType)
-	}
-	buf = append(buf, p.Rsv[:]...)
-
-	lengthBytes := make([]byte, 2)
-	binary.BigEndian.PutUint16(lengthBytes, p.Length)
-	buf = append(buf, lengthBytes...)
-
-	buf = append(buf, p.Data...)
-
-	return buf, nil
-}
-func UnmarshalPacket(data []byte) (*Packet, error) {
-	if len(data) < 8 {
-		return nil, fmt.Errorf("too short")
-	}
-
-	p := &Packet{
-		Type:     data[0],
-		AddrType: data[1],
-	}
-
-	ipLen := 4
-	if p.AddrType == 6 {
-		ipLen = 16
-	}
-
-	offset := 2
-	p.SrcIP = net.IP(data[offset : offset+ipLen])
-	offset += ipLen
-	p.DstIP = net.IP(data[offset : offset+ipLen])
-	offset += ipLen
-
-	copy(p.Rsv[:], data[offset:offset+4])
-	offset += 4
-
-	p.Length = binary.BigEndian.Uint16(data[offset : offset+2])
-	offset += 2
-
-	p.Data = data[offset:]
-
-	return p, nil
-}
-
-func SendPacket(conn *net.UDPConn, packet *Packet) {
-	bytes, err := MarshalPacket(packet)
-	if err != nil {
-		log.Debug().
-			Err(err).
-			Str("state", "serverCommand").
-			Int("len", len(bytes)).
-			Int("AddrType", int(packet.AddrType)).
-			Msg("(UDP<=Interface) Failed to marshal packet")
-	}
-	if _, err = conn.Write(bytes); err != nil {
-		log.Debug().
-			Err(err).
-			Str("state", "serverCommand").
-			Int("len", len(bytes)).
-			Int("AddrType", int(packet.AddrType)).
-			Msg("(UDP<=Interface) Failed to send packet")
-	} else {
-		log.Debug().
-			Str("state", "serverCommand").
-			Int("len", len(bytes)).
-			Int("AddrType", int(packet.AddrType)).
-			Msg("(UDP<=Interface) Sent a packet")
-	}
 }
 
 func (server *Server) PacketAPI(conn net.UDPConn, clientAddr net.UDPAddr, packet *Packet) bool {
@@ -203,7 +113,17 @@ func (server *Server) PacketAPI(conn net.UDPConn, clientAddr net.UDPAddr, packet
 			server.mu.Unlock()
 
 		case [4]byte{0, 0, 0, 1}: // ping
-			bytes, err := MarshalPacket(MakePingPacket(server.IP, clientAddr.IP))
+			packet, err := MakePingPacket(server.IP, clientAddr.IP)
+			if err != nil {
+				log.Error().
+					Err(err).
+					Str("state", "API").
+					Str("peer", strClientAddr).
+					Str("localIP", packet.SrcIP.String()).
+					Msg("Failed to make a PING packet")
+				return true
+			}
+			bytes, err := MarshalPacket(packet)
 			if err != nil {
 				log.Debug().
 					Err(err).
@@ -244,60 +164,6 @@ func (client *Client) PacketAPI(conn net.UDPConn, serverAddr net.UDPAddr, packet
 		return true
 	}
 	return false
-}
-
-func MakeDefaultPacket(senderAddr net.IP, receiverAddr net.IP, data []byte) *Packet {
-	var version int
-	if senderAddr.To4() != nil {
-		version = 4
-	} else {
-		version = 6
-	}
-	return &Packet{
-		Type:     0,
-		AddrType: byte(version),
-		SrcIP:    senderAddr,
-		DstIP:    receiverAddr,
-		Rsv:      [4]byte{0, 0, 0, 0},
-		Length:   uint16(len(data)),
-		Data:     data,
-	}
-}
-
-func MakeDisconnectPacket(serverAddr net.IP, clientAddr net.IP) *Packet {
-	var version int
-	if serverAddr.To4() != nil {
-		version = 4
-	} else {
-		version = 6
-	}
-	return &Packet{
-		Type:     1,
-		AddrType: byte(version),
-		SrcIP:    clientAddr,
-		DstIP:    serverAddr,
-		Rsv:      [4]byte{0, 0, 0, 0},
-		Length:   0,
-		Data:     nil,
-	}
-}
-
-func MakePingPacket(srcIP net.IP, dstIP net.IP) *Packet {
-	var version int
-	if dstIP.To4() != nil {
-		version = 4
-	} else {
-		version = 6
-	}
-	return &Packet{
-		Type:     1,
-		AddrType: byte(version),
-		SrcIP:    srcIP,
-		DstIP:    dstIP,
-		Rsv:      [4]byte{0, 0, 0, 1},
-		Length:   0,
-		Data:     nil,
-	}
 }
 
 type Ping struct {
@@ -341,4 +207,16 @@ func (ping *Ping) Calculate() time.Duration {
 	ping.Value = time.Since(ping.TimeStart)
 	ping.Response = true
 	return ping.Value
+}
+
+func validateIP(ip net.IP) (byte, net.IP) {
+	ip4 := ip.To4()
+	if ip4 != nil {
+		return 4, ip4
+	}
+	ip16 := ip.To16()
+	if ip16 != nil {
+		return 6, ip16
+	}
+	return 0, nil
 }

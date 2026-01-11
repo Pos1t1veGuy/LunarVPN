@@ -32,7 +32,7 @@ func main() {
 	}
 
 	core.InitLogger(*logLevel)
-	cl := core.NewWindowsClient(*appHost, *appPort, []string{}, "10.0.0.1/24")
+	cl := core.NewWindowsClient(*appHost, *appPort, []string{})
 	connected := cl.Connect(*serHost, *serPort)
 	if connected == true {
 		cl.Listen()

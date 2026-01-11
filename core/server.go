@@ -111,48 +111,21 @@ func (server *Server) Start() {
 				gop := gopacket.NewPacket(buffer[:n], layers.LayerTypeIPv4, gopacket.NoCopy)
 				ip4 := gop.Layer(layers.LayerTypeIPv4).(*layers.IPv4)
 
-				packet := Packet{
-					Type:     0,
-					AddrType: 4,
-					SrcIP:    ip4.SrcIP,
-					DstIP:    ip4.DstIP,
-					Rsv:      [4]byte{0, 0, 0, 0},
-					Length:   uint16(n),
-					Data:     buffer[:n],
+				packet, err := MakeDefaultPacket(ip4.SrcIP, ip4.DstIP, buffer[:n])
+				if err != nil {
+					log.Error().
+						Err(err).
+						Str("state", "I2U").
+						Int("len", n).
+						Str("srcIP", ip4.SrcIP.String()).
+						Str("dstIP", ip4.DstIP.String()).
+						Msg("(UDP<=Interface) Failed to make a packet")
+					continue
 				}
 				key = fmt.Sprintf("%v=>%v", packet.DstIP, packet.SrcIP)
 				v, ok := server.Cache.Get(key)
 				if ok {
-					bytes, err := MarshalPacket(&packet)
-					if err != nil {
-						log.Debug().
-							Str("state", "I2U").
-							Int("len", n).
-							Int("addrType", int(packet.AddrType)).
-							Str("srcIP", ip4.SrcIP.String()).
-							Str("dstIP", ip4.DstIP.String()).
-							Msg("(UDP<=Interface) Failed to marshal packet")
-						continue
-					}
-
-					if _, err = server.Conn.WriteToUDP(bytes, v.(*net.UDPAddr)); err != nil {
-						log.Debug().
-							Err(err).
-							Str("state", "I2U").
-							Int("len", n).
-							Int("addrType", int(packet.AddrType)).
-							Str("srcIP", ip4.SrcIP.String()).
-							Str("dstIP", ip4.DstIP.String()).
-							Msg("(UDP<=Interface) Failed to send packet")
-					} else {
-						log.Debug().
-							Str("state", "I2U").
-							Int("len", n).
-							Int("addrType", int(packet.AddrType)).
-							Str("srcIP", ip4.SrcIP.String()).
-							Str("dstIP", ip4.DstIP.String()).
-							Msg("(UDP<=Interface) Sent a packet")
-					}
+					server.SendPacket(packet, v.(*net.UDPAddr))
 				} else {
 					log.Debug().
 						Str("state", "I2U").
@@ -273,7 +246,10 @@ func (server *Server) Start() {
 	<-sigs // waiting for Ctrl+C
 	for _, peer := range server.Peers {
 		if peer != nil && peer.Addr != nil {
-			SendPacket(server.Conn, MakeDisconnectPacket(server.IP, peer.Addr.IP))
+			packet, err := MakeDisconnectPacket(server.IP, peer.VirtualIP)
+			if err != nil {
+				server.SendPacket(packet, peer.Addr)
+			}
 
 			log.Info().
 				Str("peer", peer.Addr.String()).

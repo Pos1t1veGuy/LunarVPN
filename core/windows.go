@@ -72,7 +72,7 @@ func (adapter *WintunAdapter) Close() {
 	adapter.Close()
 }
 
-func NewWindowsClient(addr string, port int, whiteList []string, CIDR string) *Client {
+func NewWindowsClient(addr string, port int, whiteList []string) *Client {
 	adapter, err := NewWintunAdapter("gotun0", 8*1024*1024)
 	if err != nil {
 		log.Fatal().
@@ -85,6 +85,6 @@ func NewWindowsClient(addr string, port int, whiteList []string, CIDR string) *C
 		Interface: adapter,
 		Stopping:  make(chan struct{}),
 		Ping:      NewPing(10 * time.Second),
-		Endpoint:  *NewEndpoint(addr, port, CIDR),
+		Endpoint:  *NewEndpoint(addr, port, "0.0.0.0/0"),
 	}
 }

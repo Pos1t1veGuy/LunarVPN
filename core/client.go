@@ -29,8 +29,6 @@ type Client struct {
 func (client *Client) Connect(addr string, port int) bool {
 	var err error
 	serverAddrFormatted := fmt.Sprintf("%s:%d", addr, port)
-	client.Tunnel = NewTunnel(addr, client.CIDR, client.Interface.Name(), client.WhiteList)
-	client.Tunnel.Stop() // clear broken routes
 
 	client.ServerAddr, err = net.ResolveUDPAddr("udp", serverAddrFormatted)
 	if err != nil {
@@ -75,7 +73,14 @@ func (client *Client) Connect(addr string, port int) bool {
 		Str("IP", client.VirtualIP.String()).
 		Msg("Client connected to server")
 
+	virtualIP4 := client.VirtualIP.To4()
+	virtualIP4[3] = 0
+
+	client.CIDR = fmt.Sprintf("%s/24", virtualIP4.String())
+	client.Tunnel = NewTunnel(addr, client.CIDR, client.Interface.Name(), client.WhiteList)
+	client.Tunnel.Stop() // clear broken routes
 	err = client.Tunnel.Start(client.VirtualIP.String())
+
 	if err != nil {
 		return false
 	}
@@ -194,16 +199,18 @@ func (client *Client) Listen() {
 				ip4 := gop.Layer(layers.LayerTypeIPv4).(*layers.IPv4)
 
 				if client.FilterIPs4(ip4) {
-					packet := Packet{
-						Type:     0,
-						AddrType: 4,
-						SrcIP:    ip4.SrcIP,
-						DstIP:    ip4.DstIP,
-						Rsv:      [4]byte{0, 0, 0, 0},
-						Length:   uint16(n),
-						Data:     buffer[:n],
+					packet, err := MakeDefaultPacket(ip4.SrcIP, ip4.DstIP, buffer[:n])
+					if err != nil {
+						log.Error().
+							Err(err).
+							Str("state", "I2U").
+							Int("len", n).
+							Str("srcIP", ip4.SrcIP.String()).
+							Str("dstIP", ip4.DstIP.String()).
+							Msg("(UDP<=Interface) Failed to make a packet")
+						continue
 					}
-					bytes, err := MarshalPacket(&packet)
+					bytes, err := MarshalPacket(packet)
 					if err != nil {
 						log.Debug().
 							Err(err).
@@ -246,7 +253,10 @@ func (client *Client) Listen() {
 	}()
 
 	<-client.Stopping
-	SendPacket(client.serverConn, MakeDisconnectPacket(client.ServerAddr.IP, client.IP))
+	packet, err := MakeDisconnectPacket(client.ServerAddr.IP, client.IP)
+	if err != nil {
+		client.SendPacket(packet)
+	}
 }
 
 func (client *Client) Stop(msg string) {
@@ -260,12 +270,19 @@ func (client *Client) Stop(msg string) {
 }
 
 func (client *Client) PingLoop(duration time.Duration) {
-	packet := MakePingPacket(client.IP, client.ServerAddr.IP)
+	packet, err := MakePingPacket(client.IP, client.ServerAddr.IP)
+	if err != nil {
+		log.Error().
+			Err(err).
+			Str("state", "ping").
+			Msg("Failed to make a PING packet. Ping loop is disabled")
+		return
+	}
 	attempts := 0
 
 	for {
 		client.Ping.Start()
-		SendPacket(client.serverConn, packet)
+		client.SendPacket(packet)
 		log.Debug().
 			Str("state", "ping").
 			Msg("Ping server")
