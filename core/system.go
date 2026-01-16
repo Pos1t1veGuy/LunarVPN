@@ -10,6 +10,7 @@ import (
 	"os"
 	"os/exec"
 	"runtime"
+	"runtime/debug"
 	"strconv"
 	"strings"
 	"sync"
@@ -501,11 +502,13 @@ func funcSafe(name string, fn func(), autoRestart bool) {
 					log.Error().
 						Str("goroutine", name).
 						Interface("panic", r).
+						Bytes("stack", debug.Stack()).
 						Msg("goroutine panicked, restarting")
 				} else {
 					log.Error().
 						Str("goroutine", name).
 						Interface("panic", r).
+						Bytes("stack", debug.Stack()).
 						Msg("goroutine panicked and disabled")
 				}
 			}

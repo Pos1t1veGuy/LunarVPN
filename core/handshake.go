@@ -174,15 +174,20 @@ func UnmarshalServerHello(data []byte) (*ServerHello, error) {
 	return sh, nil
 }
 
-func (client *Client) Handshake(layersIndexes []uint8) (net.IP, NetLayer, error) {
-	clientHello := NewClientHello(layersIndexes, []byte{})
+func (client *Client) Handshake(layersIndexes []uint8, authData []byte, defaultLayer uint8) (net.IP, NetLayer, error) {
+	clientHello := NewClientHello(layersIndexes, authData)
 	helloBytes, err := MarshalClientHello(clientHello)
+	handshakeLayer := client.LayerChains[defaultLayer]
 
 	if err != nil {
 		return nil, nil, err
 	}
 
-	_, err = client.serverConn.Write(helloBytes)
+	helloWrapped, err := handshakeLayer.Wrap(helloBytes)
+	if err != nil {
+		return nil, nil, err
+	}
+	_, err = client.serverConn.Write(helloWrapped)
 
 	if err != nil {
 		return nil, nil, err
@@ -195,7 +200,11 @@ func (client *Client) Handshake(layersIndexes []uint8) (net.IP, NetLayer, error)
 		if err != nil {
 			return nil, nil, err
 		}
-		serverHello, err := UnmarshalServerHello(buf[:n])
+		helloUnwrapped, err := handshakeLayer.Wrap(buf[:n])
+		if err != nil {
+			return nil, nil, err
+		}
+		serverHello, err := UnmarshalServerHello(helloUnwrapped)
 		if err != nil {
 			return nil, nil, err
 		}
@@ -242,30 +251,40 @@ func (client *Client) Handshake(layersIndexes []uint8) (net.IP, NetLayer, error)
 			}
 		}
 
-		fmt.Println(chain)
 		return ip4, chain, nil
 	}
 }
 
-func (server *Server) Handshake(n int, buf []byte, addr *net.UDPAddr) (*Peer, error) {
+func (server *Server) Handshake(n int, buf []byte, addr *net.UDPAddr, defaultLayer uint8, auth Authenticator) (*Peer, error) {
 	sendResponse := func(response *ServerHello) error {
 		serverHello, sendErr := MarshalServerHello(response)
 		if sendErr != nil {
 			return sendErr
 		}
-		if _, sendErr = server.Conn.WriteToUDP(serverHello, addr); sendErr != nil {
+		helloWrapped, sendErr := server.LayerChains[defaultLayer].Wrap(serverHello)
+		if sendErr != nil {
+			return sendErr
+		}
+		if _, sendErr = server.Conn.WriteToUDP(helloWrapped, addr); sendErr != nil {
 			return sendErr
 		}
 		return nil
 	}
 
-	clientHello, err := UnmarshalClientHello(buf[:n])
+	helloUnwrapped, err := server.LayerChains[defaultLayer].Unwrap(buf[:n])
+	if err != nil {
+		return nil, err
+	}
+	clientHello, err := UnmarshalClientHello(helloUnwrapped)
 	if err != nil {
 		_ = sendResponse(NewServerHello(net.IPv4zero, false, false, false, false))
 		return nil, err
 	}
 
-	// TODO: make auth
+	if !auth.Authenticate(clientHello) {
+		_ = sendResponse(NewServerHello(net.IPv4zero, true, false, false, false))
+		return nil, fmt.Errorf("invalid login or password: %v", clientHello)
+	}
 
 	layersToBuild := make([]NetLayer, 0, len(clientHello.Chain))
 	for i := 0; i < len(clientHello.Chain); i++ {
@@ -308,7 +327,6 @@ func (server *Server) Handshake(n int, buf []byte, addr *net.UDPAddr) (*Peer, er
 	server.mu.Lock()
 	server.Peers[addr.String()] = peer
 	server.mu.Unlock()
-	fmt.Println(chain)
 
 	return peer, nil
 }

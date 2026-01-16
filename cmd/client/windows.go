@@ -6,10 +6,11 @@ import (
 	"flag"
 	"fmt"
 	"os"
+	"strconv"
 	"strings"
 
-	"github.com/Pos1t1veGuy/MoonVPN/core"
-	"github.com/Pos1t1veGuy/MoonVPN/layers"
+	"github.com/Pos1t1veGuy/LunarVPN/core"
+	"github.com/Pos1t1veGuy/LunarVPN/layers"
 	"github.com/rs/zerolog/log"
 )
 
@@ -20,13 +21,34 @@ func main() {
 		"warn":  {},
 		"error": {},
 	}
+	lrs := []core.NetLayer{
+		core.NewDebugLayer(false, false),
+		layers.NewXorLayer([]byte("LunarVPN")),
+	}
 
 	appHost := flag.String("appHost", "127.0.0.1", "application host")
 	appPort := flag.Int("appPort", 8080, "application port")
 	serHost := flag.String("host", "194.41.113.111", "server host")
 	serPort := flag.Int("port", 5555, "server port")
+	login := flag.String("login", "admin", "user login")
+	password := flag.String("password", "admin", "user password")
 	logLevel := flag.String("logLevel", "info", "application log level (debug, info, warn, error)")
 	finishPause := flag.Bool("finish_pause", true, "wait for user input before exit")
+	defaultLayer := flag.Int(
+		"defaultLayer",
+		1,
+		"layer using to handshake (use -listLayers to view, by default -defaultLayer=1)",
+	)
+	layersArg := flag.String(
+		"layers",
+		"1",
+		"comma-separated layer indexes, e.g. 1,4,5 (use -listLayers to view, by default -laysers=1)",
+	)
+	listLayers := flag.Bool(
+		"listLayers",
+		false,
+		"print available layers and exit",
+	)
 	wlPath := flag.String(
 		"whitelist",
 		"whitelist.txt",
@@ -43,11 +65,12 @@ func main() {
 		"path to logfile file (by default logfile=\"\", so it is disabled)",
 	)
 	flag.Parse()
-	if *finishPause {
-		defer func() {
-			fmt.Println("Press Enter to exit...")
-			_, _ = fmt.Scanln()
-		}()
+	if *listLayers {
+		fmt.Println("Available layers:")
+		for i, l := range lrs {
+			fmt.Printf("  [%d] %s\n", i, l.GetDescription())
+		}
+		os.Exit(0)
 	}
 
 	if _, ok := validLogLevels[*logLevel]; !ok {
@@ -55,6 +78,11 @@ func main() {
 		os.Exit(1)
 	}
 	core.InitLogger(*logLevel, *logFilePath)
+
+	layersIndexes, err := parseLayers(*layersArg, lrs)
+	if err != nil {
+		fmt.Println(err)
+	}
 
 	whitelist, err := loadListFile(*wlPath, "# Place IPs line by line to exclude them from routing.\n"+
 		"# Don't enter IP addresses if you want to route all system traffic.\n\n")
@@ -73,14 +101,23 @@ func main() {
 			Str("path", *blPath).
 			Msg("Failed to load whitelist")
 	}
-	lrs := []core.NetLayer{
-		core.NewDebugLayer(false, false),
-		layers.NewXorLayer([]byte("moonVPN")),
+
+	if *finishPause {
+		defer func() {
+			fmt.Println("Press Enter to exit...")
+			_, _ = fmt.Scanln()
+		}()
 	}
 
+	//err = CheckAndUpdate()
+	//if err != nil {
+	//	log.Warn().Err(err).Msg("auto update failed")
+	//}
+
 	cl := core.NewWindowsClient(*appHost, *appPort, whitelist, blacklist, lrs)
-	connected := cl.Connect(*serHost, *serPort, []uint8{1})
+	connected := cl.Connect(*serHost, *serPort, *login, *password, layersIndexes, uint8(*defaultLayer))
 	if connected == true {
+
 		cl.Listen()
 	} else {
 		log.Fatal().
@@ -129,4 +166,28 @@ func ensureFile(path string, content string) error {
 		}
 	}
 	return err
+}
+
+func parseLayers(input string, availableLayers []core.NetLayer) ([]uint8, error) {
+	if input == "" {
+		return nil, fmt.Errorf("no layers specified")
+	}
+
+	parts := strings.Split(input, ",")
+	result := make([]uint8, 0, len(parts))
+
+	for _, p := range parts {
+		idx, err := strconv.Atoi(strings.TrimSpace(p))
+		if err != nil {
+			return nil, fmt.Errorf("invalid layer index: %q", p)
+		}
+
+		if idx < 0 || idx >= len(availableLayers) {
+			return nil, fmt.Errorf("layer index out of range: %d", idx)
+		}
+
+		result = append(result, uint8(idx))
+	}
+
+	return result, nil
 }

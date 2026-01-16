@@ -24,6 +24,7 @@ type Server struct {
 	Interface     InterfaceAdapter
 	Tunnel        *Tunnel
 	LayerChains   []NetLayer
+	AuthSystem    Authenticator
 	Endpoint
 }
 
@@ -53,7 +54,7 @@ func NewPeer(virtualIP net.IP, addr *net.UDPAddr, netChain NetLayer, ctx *Sessio
 	}
 }
 
-func (server *Server) StartUnsafe() {
+func (server *Server) StartUnsafe(defaultLayer uint8) {
 	sigs := make(chan os.Signal, 1)
 	signal.Notify(sigs, syscall.SIGINT, syscall.SIGTERM)
 	log.Info().
@@ -182,7 +183,7 @@ func (server *Server) StartUnsafe() {
 			// auth
 			v, found := server.Cache.Get(clientAddr.String())
 			if !found {
-				peer, err := server.Handshake(n, buf, clientAddr)
+				peer, err := server.Handshake(n, buf, clientAddr, defaultLayer, server.AuthSystem)
 				if err != nil || !peer.Handshaked {
 					log.Debug().
 						Err(err).
@@ -284,8 +285,8 @@ func (server *Server) StartUnsafe() {
 		Msg("Server closed")
 }
 
-func (server *Server) Start() {
-	funcSafe("mainLoop", server.StartUnsafe, false)
+func (server *Server) Start(defaultLayer uint8) {
+	funcSafe("mainLoop", func() { server.StartUnsafe(defaultLayer) }, false)
 }
 
 func (server *Server) DisconnectAll() {

@@ -7,8 +7,8 @@ import (
 	"fmt"
 	"os"
 
-	"github.com/Pos1t1veGuy/MoonVPN/core"
-	"github.com/Pos1t1veGuy/MoonVPN/layers"
+	"github.com/Pos1t1veGuy/LunarVPN/core"
+	"github.com/Pos1t1veGuy/LunarVPN/layers"
 )
 
 func main() {
@@ -23,6 +23,11 @@ func main() {
 	host := flag.String("host", "0.0.0.0", "application host")
 	logLevel := flag.String("logLevel", "info", "application log level (debug, info, warn, error)")
 	port := flag.Int("port", 5555, "application port")
+	defaultLayer := flag.Int(
+		"defaultLayer",
+		1,
+		"layer using to handshake (use -listLayers to view, by default -defaultLayer=1)",
+	)
 	logFilePath := flag.String(
 		"logfile",
 		"",
@@ -37,10 +42,14 @@ func main() {
 
 	lrs := []core.NetLayer{
 		core.NewDebugLayer(false, false),
-		layers.NewXorLayer([]byte("moonVPN")),
+		layers.NewXorLayer([]byte("LunarVPN")),
 	}
 
 	core.InitLogger(*logLevel, *logFilePath)
-	srv := core.NewLinuxServer(*host, *port, *cidr, lrs)
-	srv.Start()
+	srv := core.NewLinuxServer(*host, *port, *cidr, lrs, &core.StaticAuth{
+		Allowed: map[string]string{
+			"admin": "admin",
+		},
+	})
+	srv.Start(uint8(*defaultLayer))
 }

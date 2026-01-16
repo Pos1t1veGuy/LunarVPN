@@ -10,12 +10,14 @@ type NetLayer interface {
 	SetNext(next NetLayer)
 	GetNext() NetLayer
 
+	GetDescription() string
 	Init(ctx *SessionContext) error
 	Clone() NetLayer
 }
 
 type BaseLayer struct {
-	next NetLayer
+	next        NetLayer
+	Description string
 }
 
 func (b *BaseLayer) SetNext(next NetLayer) {
@@ -48,7 +50,13 @@ type DebugLayer struct {
 }
 
 func NewDebugLayer(showLen bool, showContent bool) *DebugLayer {
-	return &DebugLayer{showLen: showLen, showContent: showContent}
+	return &DebugLayer{
+		showLen:     showLen,
+		showContent: showContent,
+		BaseLayer: BaseLayer{
+			Description: "Debug layer (logging packets)",
+		},
+	}
 }
 
 func (debug *DebugLayer) log(direction string, data []byte) {
@@ -88,6 +96,9 @@ func (debug *DebugLayer) Unwrap(data []byte) ([]byte, error) {
 	return debug.UnwrapNext(out)
 }
 
+func (debug *DebugLayer) GetDescription() string {
+	return debug.Description
+}
 func (debug *DebugLayer) Init(ctx *SessionContext) error {
 	return nil
 }
@@ -95,6 +106,9 @@ func (debug *DebugLayer) Clone() NetLayer {
 	return &DebugLayer{
 		showLen:     debug.showLen,
 		showContent: debug.showContent,
+		BaseLayer: BaseLayer{
+			Description: "Debug layer (logging packets)",
+		},
 	}
 }
 

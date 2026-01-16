@@ -29,7 +29,7 @@ type Client struct {
 	Endpoint
 }
 
-func (client *Client) Connect(addr string, port int, layersIndexes []uint8) bool {
+func (client *Client) Connect(addr string, port int, login, password string, layersIndexes []uint8, defaultLayer uint8) bool {
 	var err error
 	serverAddrFormatted := fmt.Sprintf("%s:%d", addr, port)
 
@@ -55,12 +55,17 @@ func (client *Client) Connect(addr string, port int, layersIndexes []uint8) bool
 	log.Info().
 		Str("state", "connecting").
 		Str("ServerAddr", serverAddrFormatted).
+		Str("login", login).
 		Msg("Connecting")
 
 	_ = client.serverConn.SetDeadline(time.Now().Add(3 * time.Second))
 	var virtualIP net.IP
 	for attempt := 1; attempt <= 3; attempt++ {
-		virtualIP, client.ActiveNLayer, err = client.Handshake(layersIndexes)
+		virtualIP, client.ActiveNLayer, err = client.Handshake(
+			layersIndexes,
+			[]byte(fmt.Sprintf("%s:%s", login, password)),
+			defaultLayer,
+		)
 		if err == nil {
 			break
 		}

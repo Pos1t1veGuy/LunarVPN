@@ -1,4 +1,4 @@
-module github.com/Pos1t1veGuy/MoonVPN
+module github.com/Pos1t1veGuy/LunarVPN
 
 go 1.25.5
 

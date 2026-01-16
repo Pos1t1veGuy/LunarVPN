@@ -4,7 +4,7 @@ import (
 	"bytes"
 	"testing"
 
-	"github.com/Pos1t1veGuy/MoonVPN/core"
+	"github.com/Pos1t1veGuy/LunarVPN/core"
 )
 
 func TestNetLayersRoundTrip(t *testing.T) {
