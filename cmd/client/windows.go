@@ -14,6 +14,12 @@ import (
 	"github.com/rs/zerolog/log"
 )
 
+const (
+	CurrentVersion = "1.0.0"
+	RepoOwner      = "LunarVPN"
+	RepoName       = "Pos1t1veGuy"
+)
+
 func main() {
 	validLogLevels := map[string]struct{}{
 		"debug": {},
@@ -49,6 +55,11 @@ func main() {
 		false,
 		"print available layers and exit",
 	)
+	version := flag.Bool(
+		"version",
+		false,
+		"print version and exit",
+	)
 	wlPath := flag.String(
 		"whitelist",
 		"whitelist.txt",
@@ -65,6 +76,10 @@ func main() {
 		"path to logfile file (by default logfile=\"\", so it is disabled)",
 	)
 	flag.Parse()
+	if *version {
+		fmt.Println(CurrentVersion)
+		os.Exit(0)
+	}
 	if *listLayers {
 		fmt.Println("Available layers:")
 		for i, l := range lrs {
@@ -109,10 +124,16 @@ func main() {
 		}()
 	}
 
-	//err = CheckAndUpdate()
-	//if err != nil {
-	//	log.Warn().Err(err).Msg("auto update failed")
-	//}
+	log.Info().
+		Msg("checking updates...")
+	err = CheckAndUpdate()
+	if err != nil {
+		log.Warn().Err(err).Msg("auto update failed")
+	} else {
+		log.Info().
+			Str("version", CurrentVersion).
+			Msg("application version is latest")
+	}
 
 	cl := core.NewWindowsClient(*appHost, *appPort, whitelist, blacklist, lrs)
 	connected := cl.Connect(*serHost, *serPort, *login, *password, layersIndexes, uint8(*defaultLayer))
