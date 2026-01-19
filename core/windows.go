@@ -83,10 +83,9 @@ func NewWindowsClient(addr string, port int, whiteList []string, blackList []str
 	return &Client{
 		WhiteList:   whiteList,
 		BlackList:   blackList,
-		Interface:   adapter,
 		LayerChains: netLayers,
 		Stopping:    make(chan struct{}),
 		Ping:        NewPing(20 * time.Second),
-		Endpoint:    *NewEndpoint(addr, port, "0.0.0.0/0"),
+		Endpoint:    *NewEndpoint(addr, port, "0.0.0.0/0", adapter, NewTunnel),
 	}
 }

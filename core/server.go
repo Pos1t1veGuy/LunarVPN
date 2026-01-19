@@ -21,8 +21,6 @@ type Server struct {
 	Cache         *cache.Cache
 	Network       *Network
 	AnonymousPeer *Peer
-	Interface     InterfaceAdapter
-	Tunnel        *Tunnel
 	LayerChains   []NetLayer
 	AuthSystem    Authenticator
 	Endpoint
@@ -70,7 +68,7 @@ func (server *Server) StartUnsafe(defaultLayer uint8) {
 			Str("CIDR", server.CIDR).
 			Msg("Failed to parse CIDR")
 	}
-	server.Tunnel = NewTunnel("", server.CIDR, "gotun0", []string{}, []string{})
+	server.Tunnel = server.tunFactory("", server.CIDR, "gotun0", []string{}, []string{})
 
 	udpAddr, err := net.ResolveUDPAddr("udp", server.FullAddr)
 	if err != nil {

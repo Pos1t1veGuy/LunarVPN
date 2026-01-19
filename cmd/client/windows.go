@@ -125,7 +125,6 @@ func main() {
 	cl := core.NewWindowsClient(*appHost, *appPort, whitelist, blacklist, lrs)
 	connected := cl.Connect(*serHost, *serPort, *login, *password, layersIndexes, uint8(*defaultLayer))
 	if connected == true {
-
 		cl.Listen()
 	} else {
 		log.Fatal().

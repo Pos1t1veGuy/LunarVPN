@@ -29,9 +29,15 @@ type Endpoint struct {
 
 	Net  *net.IPNet
 	Conn *net.UDPConn
+
+	Interface  InterfaceAdapter
+	tunFactory func(destinationIP, netCidr, IfaceName string, whitelist []string, blacklist []string) *Tunnel
+	Tunnel     *Tunnel
 }
 
-func NewEndpoint(addr string, port int, CIDR string) *Endpoint {
+func NewEndpoint(addr string, port int, CIDR string, iface InterfaceAdapter,
+	tunFactory func(destinationIP, netCidr, IfaceName string, whitelist []string, blacklist []string) *Tunnel,
+) *Endpoint {
 	_, ipNet, err := net.ParseCIDR(CIDR)
 	if err != nil {
 		log.Fatal().
@@ -42,12 +48,14 @@ func NewEndpoint(addr string, port int, CIDR string) *Endpoint {
 	}
 
 	return &Endpoint{
-		Addr:     addr,
-		IP:       net.ParseIP(addr),
-		Port:     port,
-		FullAddr: fmt.Sprintf("%s:%d", addr, port),
-		CIDR:     CIDR,
-		Net:      ipNet,
+		Addr:       addr,
+		IP:         net.ParseIP(addr),
+		Port:       port,
+		FullAddr:   fmt.Sprintf("%s:%d", addr, port),
+		CIDR:       CIDR,
+		Net:        ipNet,
+		Interface:  iface,
+		tunFactory: tunFactory,
 	}
 }
 
@@ -62,7 +70,7 @@ type Tunnel struct {
 	bypassingIPs []string
 }
 
-func NewTunnel(destinationIP string, netCidr string, IfaceName string, whitelist []string, blacklist []string) *Tunnel {
+func NewTunnel(destinationIP, netCidr, IfaceName string, whitelist []string, blacklist []string) *Tunnel {
 	return &Tunnel{
 		DestinationIP: destinationIP,
 		Whitelist:     whitelist,
