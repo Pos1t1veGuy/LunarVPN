@@ -6,6 +6,7 @@ import (
 	"flag"
 	"fmt"
 	"os"
+	"runtime"
 	"strconv"
 	"strings"
 
@@ -14,11 +15,7 @@ import (
 	"github.com/rs/zerolog/log"
 )
 
-const (
-	CurrentVersion = "1.0.0"
-	RepoOwner      = "LunarVPN"
-	RepoName       = "Pos1t1veGuy"
-)
+const CurrentVersion = "1.0.0"
 
 func main() {
 	validLogLevels := map[string]struct{}{
@@ -31,6 +28,7 @@ func main() {
 		core.NewDebugLayer(false, false),
 		layers.NewXorLayer([]byte("LunarVPN")),
 	}
+	replaceStarterIfNewExists()
 
 	appHost := flag.String("appHost", "127.0.0.1", "application host")
 	appPort := flag.Int("appPort", 8080, "application port")
@@ -124,17 +122,6 @@ func main() {
 		}()
 	}
 
-	log.Info().
-		Msg("checking updates...")
-	err = CheckAndUpdate()
-	if err != nil {
-		log.Warn().Err(err).Msg("auto update failed")
-	} else {
-		log.Info().
-			Str("version", CurrentVersion).
-			Msg("application version is latest")
-	}
-
 	cl := core.NewWindowsClient(*appHost, *appPort, whitelist, blacklist, lrs)
 	connected := cl.Connect(*serHost, *serPort, *login, *password, layersIndexes, uint8(*defaultLayer))
 	if connected == true {
@@ -211,4 +198,24 @@ func parseLayers(input string, availableLayers []core.NetLayer) ([]uint8, error)
 	}
 
 	return result, nil
+}
+
+func replaceStarterIfNewExists() error {
+	starterFile := "starter"
+	if runtime.GOOS == "windows" {
+		starterFile = "starter.exe"
+	}
+	newFile := starterFile + ".new"
+
+	if _, err := os.Stat(newFile); err == nil {
+		if err := os.Remove(starterFile); err != nil && !os.IsNotExist(err) {
+			return err
+		}
+
+		if err := os.Rename(newFile, starterFile); err != nil {
+			return err
+		}
+	}
+
+	return nil
 }
