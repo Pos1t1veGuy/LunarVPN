@@ -27,12 +27,12 @@ type Server struct {
 }
 
 type Peer struct {
-	VirtualIP  net.IP
-	Addr       *net.UDPAddr
-	LastSeen   time.Time
-	NLChain    NetLayer
-	Context    *SessionContext
-	Handshaked bool
+	VirtualIP   net.IP
+	Addr        *net.UDPAddr
+	ConnectedAt time.Time
+	NLChain     NetLayer
+	Context     *SessionContext
+	Handshaked  bool
 }
 
 type SessionContext struct {
@@ -43,12 +43,12 @@ type SessionContext struct {
 
 func NewPeer(virtualIP net.IP, addr *net.UDPAddr, netChain NetLayer, ctx *SessionContext, handshaked bool) *Peer {
 	return &Peer{
-		VirtualIP:  virtualIP,
-		Addr:       addr,
-		LastSeen:   time.Time{},
-		NLChain:    netChain,
-		Context:    ctx,
-		Handshaked: handshaked,
+		VirtualIP:   virtualIP,
+		Addr:        addr,
+		ConnectedAt: time.Time{},
+		NLChain:     netChain,
+		Context:     ctx,
+		Handshaked:  handshaked,
 	}
 }
 
@@ -210,6 +210,11 @@ func (server *Server) StartUnsafe(defaultLayer uint8) {
 			}
 
 			peer := v.(*Peer)
+			server.Cache.Set(
+				clientAddr.String(),
+				peer,
+				cache.DefaultExpiration,
+			)
 
 			unwrapped, err := peer.NLChain.Wrap(buf[:n])
 			if err != nil {
@@ -363,6 +368,5 @@ func (network *Network) increment() {
 	}
 }
 
-// старых peer надо чистить по lastseen
 // сделать базовый httpws враппер; нжинкс
 // базу данных; сделать из впна микросервис докер; бота; дописать страничку
