@@ -107,7 +107,6 @@ func (session *UdpSession) PingLoop(packet *Packet, sendPacket func(packet *Pack
 	attempts := 0
 
 	for {
-		fmt.Println(session.Stopping)
 		select {
 		case <-session.Stopping:
 			return
