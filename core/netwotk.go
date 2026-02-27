@@ -8,6 +8,7 @@ import (
 	"sync"
 	"time"
 
+	"github.com/patrickmn/go-cache"
 	"github.com/rs/zerolog/log"
 )
 
@@ -235,7 +236,7 @@ func (client *Client) SendPacket(packet *Packet, layer NetLayer) {
 			Msg("(UDP<=Interface) Failed to wrap packet")
 	}
 
-	if _, err = client.serverConn.Write(wrapped); err != nil {
+	if _, err = client.Session.Write(wrapped); err != nil {
 		log.Debug().
 			Err(err).
 			Str("state", "serverCommand").
@@ -288,7 +289,7 @@ func (server *Server) SendPacket(packet *Packet, peerAddr *net.UDPAddr, layer Ne
 	}
 }
 
-func (server *Server) PacketAPI(conn net.UDPConn, peer *Peer, packet *Packet) bool {
+func (server *Server) PacketAPI(conn net.UDPConn, peer *Peer, packet *Packet, clientAddr *net.UDPAddr) bool {
 	if packet.Type == 1 {
 		strClientAddr := peer.Addr.String()
 
@@ -324,6 +325,13 @@ func (server *Server) PacketAPI(conn net.UDPConn, peer *Peer, packet *Packet) bo
 			}
 			server.SendPacket(ping, peer.Addr, peer.NLChain)
 		}
+
+		server.Cache.Set(
+			clientAddr.String(),
+			peer,
+			cache.DefaultExpiration,
+		)
+
 		return true
 	}
 	return false

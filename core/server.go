@@ -68,7 +68,7 @@ func (server *Server) StartUnsafe(defaultLayer uint8) {
 			Str("CIDR", server.CIDR).
 			Msg("Failed to parse CIDR")
 	}
-	server.Tunnel = server.tunFactory("", server.CIDR, "gotun0", []string{}, []string{})
+	server.Tunnel = server.tunFactory("", server.CIDR, server.Gateway, "gotun0", []string{}, []string{})
 
 	udpAddr, err := net.ResolveUDPAddr("udp", server.FullAddr)
 	if err != nil {
@@ -235,7 +235,7 @@ func (server *Server) StartUnsafe(defaultLayer uint8) {
 					Msg("(UDP=>Interface) Failed to marshal packet")
 				continue
 			}
-			if !server.PacketAPI(*server.Conn, peer, packet) {
+			if !server.PacketAPI(*server.Conn, peer, packet, clientAddr) {
 				if _, err := server.Interface.Write(packet.Data); err != nil {
 					log.Debug().
 						Err(err).

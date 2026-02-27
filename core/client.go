@@ -14,14 +14,13 @@ import (
 )
 
 type Client struct {
-	ServerAddr   *net.UDPAddr
-	VirtualIP    net.IP
-	serverConn   *net.UDPConn
-	WhiteList    []string
-	BlackList    []string
-	ActiveNLayer NetLayer
-	LayerChains  []NetLayer
-	Stopping     chan struct{}
+	VirtualIP   net.IP
+	ServerAddr  *net.UDPAddr
+	WhiteList   []string
+	BlackList   []string
+	LayerChains []NetLayer
+	Stopping    chan struct{}
+	Session     *UdpSession
 
 	Ping *Ping
 	Endpoint
@@ -40,7 +39,7 @@ func (client *Client) Connect(addr string, port int, login, password string, lay
 			Msg("Failed to resolve server address")
 	}
 
-	client.serverConn, err = net.DialUDP("udp", nil, client.ServerAddr)
+	client.VirtualIP, err = client.Session.Open(client.ServerAddr, client.LayerChains, defaultLayer, layersIndexes, login, password)
 	if err != nil {
 		log.Error().
 			Err(err).
@@ -52,47 +51,23 @@ func (client *Client) Connect(addr string, port int, login, password string, lay
 
 	log.Info().
 		Str("state", "connecting").
-		Str("ServerAddr", serverAddrFormatted).
-		Str("login", login).
-		Msg("Connecting")
-
-	_ = client.serverConn.SetDeadline(time.Now().Add(3 * time.Second))
-	var virtualIP net.IP
-	for attempt := 1; attempt <= 3; attempt++ {
-		virtualIP, client.ActiveNLayer, err = client.Handshake(
-			layersIndexes,
-			[]byte(fmt.Sprintf("%s:%s", login, password)),
-			defaultLayer,
-		)
-		if err == nil {
-			break
-		}
-		log.Warn().
-			Err(err).
-			Str("state", "connecting").
-			Int("attempt", attempt).
-			Msg("Handshake failed, retrying...")
-		time.Sleep(1 * time.Second)
-	}
-	if err != nil {
-		log.Error().
-			Str("state", "connecting").
-			Msg("All handshake attempts failed. Server is unavailable")
-		return false
-	}
-	client.VirtualIP = virtualIP
-	_ = client.serverConn.SetDeadline(time.Time{})
-	log.Info().
-		Str("state", "connecting").
 		Str("IP", client.VirtualIP.String()).
 		Msg("Client connected to server")
 
 	virtualIP4 := make(net.IP, len(client.VirtualIP))
 	copy(virtualIP4, client.VirtualIP)
 	virtualIP4[3] = 0
+	gatewayIP4 := make(net.IP, len(client.VirtualIP))
+	copy(gatewayIP4, client.VirtualIP)
+	if client.VirtualIP[3] != 1 {
+		gatewayIP4[3] = 1
+	} else {
+		gatewayIP4[3] = 2
+	}
 
 	client.CIDR = fmt.Sprintf("%s/24", virtualIP4.String())
-	client.Tunnel = client.tunFactory(addr, client.CIDR, client.Interface.Name(), client.WhiteList, client.BlackList)
+	client.Gateway = gatewayIP4.String()
+	client.Tunnel = client.tunFactory(addr, client.CIDR, client.Gateway, client.Interface.Name(), client.WhiteList, client.BlackList)
 	client.Tunnel.Stop() // clear broken routes
 	err = client.Tunnel.Start(client.VirtualIP.String())
 
@@ -111,7 +86,7 @@ func (client *Client) ListenUnsafe() {
 	defer log.Info().
 		Str("state", "listening").
 		Msg("Client disconnected")
-	defer client.serverConn.Close()
+	defer client.Session.Conn.Close()
 	defer client.Tunnel.Stop()
 
 	go func() {
@@ -151,13 +126,13 @@ func (client *Client) ListenUnsafe() {
 			default:
 			}
 
-			n, err := client.serverConn.Read(buf)
+			n, err := client.Session.Conn.Read(buf)
 			if err != nil || n == 0 {
 				time.Sleep(5 * time.Millisecond)
 				continue
 			}
 
-			unwrapped, err := client.ActiveNLayer.Unwrap(buf[:n])
+			unwrapped, err := client.Session.NLayer.Unwrap(buf[:n])
 			if err != nil {
 				log.Error().
 					Err(err).
@@ -261,8 +236,8 @@ func (client *Client) ListenUnsafe() {
 						time.Sleep(5 * time.Millisecond)
 						continue
 					}
-					wrapped, err := client.ActiveNLayer.Wrap(bytes)
-					if _, err = client.serverConn.Write(wrapped); err != nil {
+					wrapped, err := client.Session.NLayer.Wrap(bytes)
+					if _, err = client.Session.Conn.Write(wrapped); err != nil {
 						log.Debug().
 							Err(err).
 							Str("state", "I2U").
@@ -300,7 +275,7 @@ func (client *Client) ListenUnsafe() {
 	<-client.Stopping
 	packet, err := MakeDisconnectPacket(client.ServerAddr.IP, client.IP)
 	if err != nil {
-		client.SendPacket(packet, client.ActiveNLayer)
+		client.SendPacket(packet, client.Session.NLayer)
 	}
 }
 
@@ -337,7 +312,7 @@ func (client *Client) PingLoop(duration time.Duration) {
 		}
 
 		client.Ping.Start()
-		client.SendPacket(packet, client.ActiveNLayer)
+		client.SendPacket(packet, client.Session.NLayer)
 		log.Debug().
 			Str("state", "ping").
 			Msg("Ping server")

@@ -26,17 +26,18 @@ type Endpoint struct {
 	Port     int
 	FullAddr string
 	CIDR     string
+	Gateway  string
 
 	Net  *net.IPNet
 	Conn *net.UDPConn
 
 	Interface  InterfaceAdapter
-	tunFactory func(destinationIP, netCidr, IfaceName string, whitelist []string, blacklist []string) *Tunnel
+	tunFactory func(destinationIP, netCidr, gatewayIP, IfaceName string, whitelist []string, blacklist []string) *Tunnel
 	Tunnel     *Tunnel
 }
 
-func NewEndpoint(addr string, port int, CIDR string, iface InterfaceAdapter,
-	tunFactory func(destinationIP, netCidr, IfaceName string, whitelist []string, blacklist []string) *Tunnel,
+func NewEndpoint(addr string, port int, CIDR, gatewayIP string, iface InterfaceAdapter,
+	tunFactory func(destinationIP, netCidr, gatewayIP, IfaceName string, whitelist []string, blacklist []string) *Tunnel,
 ) *Endpoint {
 	_, ipNet, err := net.ParseCIDR(CIDR)
 	if err != nil {
@@ -53,6 +54,7 @@ func NewEndpoint(addr string, port int, CIDR string, iface InterfaceAdapter,
 		Port:       port,
 		FullAddr:   fmt.Sprintf("%s:%d", addr, port),
 		CIDR:       CIDR,
+		Gateway:    gatewayIP,
 		Net:        ipNet,
 		Interface:  iface,
 		tunFactory: tunFactory,
@@ -66,17 +68,19 @@ type Tunnel struct {
 	IfaceName     string
 	InterfaceIP   string
 	NetCIDR       string
+	NetGateway    string
 
 	bypassingIPs []string
 }
 
-func NewTunnel(destinationIP, netCidr, IfaceName string, whitelist []string, blacklist []string) *Tunnel {
+func NewTunnel(destinationIP, netCidr, gatewayIP, IfaceName string, whitelist []string, blacklist []string) *Tunnel {
 	return &Tunnel{
 		DestinationIP: destinationIP,
 		Whitelist:     whitelist,
 		Blacklist:     blacklist,
 		IfaceName:     IfaceName,
 		NetCIDR:       netCidr,
+		NetGateway:    gatewayIP,
 	}
 }
 
@@ -228,8 +232,6 @@ func (tunnel *Tunnel) Start(interfaceIP string) error {
 		// set interface IP
 		ExecCmd("cmd", "/C", fmt.Sprintf(`netsh interface ipv4 set address name="%s" static %s mask=%s`,
 			tunnel.IfaceName, tunnel.InterfaceIP, ifaceMask))
-		// set metric to interface
-		ExecCmd("netsh", "interface", "ipv4", "set", "interface", strconv.Itoa(curIface.Index), "metric=1")
 		// set mtu to interface
 		ExecCmd(
 			"netsh",
@@ -243,12 +245,6 @@ func (tunnel *Tunnel) Start(interfaceIP string) error {
 		)
 
 		if tunnel.DestinationIP != "" { // client
-			// add dns route
-			ExecCmd("netsh", "interface", "ipv4", "set", "dns", fmt.Sprintf(`name="%s"`, tunnel.IfaceName),
-				"static", "8.8.8.8")
-			ExecCmd("netsh", "interface", "ipv4", "add", "dns", fmt.Sprintf(`name="%s"`, tunnel.IfaceName),
-				"addr=1.1.1.1", "index=2")
-
 			if len(tunnel.Whitelist) == 0 {
 				// excluding route to remove connection loop
 				defGatewayIP, err := getDefaultGatewayWindows()
@@ -258,11 +254,11 @@ func (tunnel *Tunnel) Start(interfaceIP string) error {
 						Str("state", "configTunnel").
 						Msg("Can not get default gateway")
 				}
-
 				ExecCmd("route", "add", tunnel.DestinationIP, "mask", "255.255.255.255", defGatewayIP.String(),
 					"metric", "1", "if", strconv.Itoa(defIfaceIndex))
+
 				// add absolute route to interface
-				ExecCmd("route", "add", "0.0.0.0", "mask", "0.0.0.0", "0.0.0.0", "metric", "1",
+				ExecCmd("route", "add", "0.0.0.0", "mask", "0.0.0.0", tunnel.NetGateway, "metric", "1",
 					"if", strconv.Itoa(curIface.Index))
 				log.Info().
 					Str("state", "configTunnel").
@@ -302,7 +298,16 @@ func (tunnel *Tunnel) Start(interfaceIP string) error {
 						Msg("Failed to parse IP address")
 				}
 			}
+			// add dns route
+			ExecCmd("netsh", "interface", "ipv4", "set", "dns", fmt.Sprintf(`name="%s"`, tunnel.IfaceName),
+				"static", "8.8.8.8", "register=primary")
+			ExecCmd("route", "add", "8.8.8.8", "mask", "255.255.255.255", tunnel.NetGateway, "metric", "1",
+				"if", strconv.Itoa(curIface.Index))
+			ExecCmd("netsh", "interface", "ipv4", "add", "dns", fmt.Sprintf(`name="%s"`, tunnel.IfaceName),
+				"addr=1.1.1.1", "index=2")
 		}
+		// set metric to interface
+		ExecCmd("netsh", "interface", "ipv4", "set", "interface", strconv.Itoa(curIface.Index), "metric=10")
 
 	default:
 		return fmt.Errorf("not support os:%v", runtime.GOOS)

@@ -174,10 +174,10 @@ func UnmarshalServerHello(data []byte) (*ServerHello, error) {
 	return sh, nil
 }
 
-func (client *Client) Handshake(layersIndexes []uint8, authData []byte, defaultLayer uint8) (net.IP, NetLayer, error) {
+func ClientHandshake(session Session, layerChains []NetLayer, defaultLayer uint8, layersIndexes []uint8, authData []byte) (net.IP, NetLayer, error) {
 	clientHello := NewClientHello(layersIndexes, authData)
 	helloBytes, err := MarshalClientHello(clientHello)
-	handshakeLayer := client.LayerChains[defaultLayer]
+	handshakeLayer := layerChains[defaultLayer]
 
 	if err != nil {
 		return nil, nil, err
@@ -187,7 +187,7 @@ func (client *Client) Handshake(layersIndexes []uint8, authData []byte, defaultL
 	if err != nil {
 		return nil, nil, err
 	}
-	_, err = client.serverConn.Write(helloWrapped)
+	_, err = session.Write(helloWrapped)
 
 	if err != nil {
 		return nil, nil, err
@@ -196,7 +196,7 @@ func (client *Client) Handshake(layersIndexes []uint8, authData []byte, defaultL
 	buf := make([]byte, 1024)
 
 	for {
-		n, err := client.serverConn.Read(buf)
+		n, err := session.Read(buf)
 		if err != nil {
 			return nil, nil, err
 		}
@@ -238,10 +238,10 @@ func (client *Client) Handshake(layersIndexes []uint8, authData []byte, defaultL
 		layersToBuild := make([]NetLayer, 0, len(clientHello.Chain))
 		for i := 0; i < len(clientHello.Chain); i++ {
 			idx := int(clientHello.Chain[i])
-			if idx >= len(client.LayerChains) {
+			if idx >= len(layerChains) {
 				return nil, nil, fmt.Errorf("invalid layer index: %d", idx)
 			}
-			layersToBuild = append(layersToBuild, client.LayerChains[idx].Clone())
+			layersToBuild = append(layersToBuild, layerChains[idx].Clone())
 		}
 		chain := BuildNetLayers(layersToBuild...)
 

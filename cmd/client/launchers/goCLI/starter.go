@@ -85,26 +85,26 @@ func main() {
 }
 
 func run(appPath string) error {
+	applicationPath := filepath.Join(appPath, "client")
+	exePath, err := os.Executable()
+	if err != nil {
+		return err
+	}
+	starterDir := filepath.Dir(exePath)
+
+	var cmd *exec.Cmd
 	switch runtime.GOOS {
-	case "windows": // using powershell to save privileges
-		cmd := exec.Command("powershell", "-Command",
-			fmt.Sprintf(`Start-Process -FilePath "%s" -Verb RunAs`, appPath),
-		)
-		cmd.SysProcAttr = nil
-		return cmd.Start()
-
+	case "windows":
+		cmd = exec.Command("cmd", "/C", "start", applicationPath+".exe")
 	case "linux":
-		cmd := exec.Command(appPath, os.Args[1:]...)
-		cmd.Stdout = os.Stdout
-		cmd.Stderr = os.Stderr
-		cmd.Stdin = os.Stdin
-		res := cmd.Start()
-		os.Exit(0)
-		return res
-
+		cmd = exec.Command("x-terminal-emulator", "-e", applicationPath)
+	case "darwin":
+		cmd = exec.Command("open", "-a", applicationPath)
 	default:
 		return errors.New("unsupported platform")
 	}
+	cmd.Dir = starterDir
+	return cmd.Start()
 }
 
 func getClientVersion(appPath string) (string, error) {
