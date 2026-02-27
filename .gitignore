@@ -4,3 +4,6 @@
 *.exe
 *.txt
 *.zip
+*.lunar
+dist
+build

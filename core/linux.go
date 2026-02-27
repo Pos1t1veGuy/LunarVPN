@@ -89,9 +89,12 @@ func NewLinuxServer(addr string, port int, CIDR string, LayerChains []NetLayer, 
 			Str("serverAddr", serverAddrFormatted).
 			Msg("Failed to create adapter")
 	}
+	gatewayIP4 := make(net.IP, len(network.IP))
+	copy(gatewayIP4, network.IP)
+	gatewayIP4[3] = 1
 
 	return &Server{
-		Endpoint:      *NewEndpoint(addr, port, CIDR, adapter, NewTunnel),
+		Endpoint:      *NewEndpoint(addr, port, gatewayIP4.String(), CIDR, adapter, NewTunnel),
 		Peers:         make(map[string]*Peer),
 		Cache:         cache.New(30*time.Minute, 10*time.Minute),
 		Network:       network,
