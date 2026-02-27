@@ -9,6 +9,7 @@ import (
 	"runtime"
 	"strconv"
 	"strings"
+	"time"
 
 	"github.com/Pos1t1veGuy/LunarVPN/core"
 	"github.com/Pos1t1veGuy/LunarVPN/layers"
@@ -114,7 +115,7 @@ func main() {
 			Msg("Failed to load whitelist")
 	}
 
-	cl := core.NewWindowsClient(*appHost, *appPort, whitelist, blacklist, lrs)
+	cl := core.NewWindowsClient(*appHost, *appPort, whitelist, blacklist, lrs, core.NewUdpSession(5*time.Second))
 	connected := cl.Connect(*serHost, *serPort, *login, *password, layersIndexes, uint8(*defaultLayer))
 	if connected == true {
 		cl.Listen()

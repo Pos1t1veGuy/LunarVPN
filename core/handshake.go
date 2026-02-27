@@ -187,7 +187,7 @@ func ClientHandshake(session Session, layerChains []NetLayer, defaultLayer uint8
 	if err != nil {
 		return nil, nil, err
 	}
-	_, err = session.Write(helloWrapped)
+	_, err = session.GetConnection().Write(helloWrapped)
 
 	if err != nil {
 		return nil, nil, err
@@ -196,7 +196,7 @@ func ClientHandshake(session Session, layerChains []NetLayer, defaultLayer uint8
 	buf := make([]byte, 1024)
 
 	for {
-		n, err := session.Read(buf)
+		n, err := session.GetConnection().Read(buf)
 		if err != nil {
 			return nil, nil, err
 		}

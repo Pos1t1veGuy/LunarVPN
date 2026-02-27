@@ -215,7 +215,7 @@ func MakePingPacket(srcIP net.IP, dstIP net.IP) (*Packet, error) {
 	}, nil
 }
 
-func (client *Client) SendPacket(packet *Packet, layer NetLayer) {
+func (client *Client) SendPacket(packet *Packet) {
 	bytes, err := MarshalPacket(packet)
 	if err != nil {
 		log.Debug().
@@ -226,17 +226,7 @@ func (client *Client) SendPacket(packet *Packet, layer NetLayer) {
 			Msg("(UDP<=Interface) Failed to marshal packet")
 	}
 
-	wrapped, err := layer.Wrap(bytes)
-	if err != nil {
-		log.Debug().
-			Err(err).
-			Str("state", "serverCommand").
-			Int("len", len(bytes)).
-			Int("AddrType", int(packet.AddrType)).
-			Msg("(UDP<=Interface) Failed to wrap packet")
-	}
-
-	if _, err = client.Session.Write(wrapped); err != nil {
+	if _, err = client.Session.Write(bytes); err != nil {
 		log.Debug().
 			Err(err).
 			Str("state", "serverCommand").
@@ -343,10 +333,11 @@ func (client *Client) PacketAPI(conn net.UDPConn, serverAddr net.UDPAddr, packet
 		case [4]byte{0, 0, 0, 0}: // disconnect
 			client.Stop("(UDP=>Interface) Server disconnected you")
 		case [4]byte{0, 0, 0, 1}: // pong
-			client.Ping.Calculate()
+			ping := client.Session.GetPing()
+			ping.Calculate()
 			log.Info().
 				Str("state", "API").
-				Str("ping", client.Ping.Value.Truncate(time.Millisecond).String()).
+				Str("ping", ping.Value.Truncate(time.Millisecond).String()).
 				Msg("(UDP=>Interface) Pong received")
 		}
 		return true
@@ -358,14 +349,14 @@ type Ping struct {
 	TimeStart  time.Time
 	Calculated bool
 	Value      time.Duration
-	Threshold  time.Duration
+	Duration   time.Duration
 	Response   bool
 
 	mu sync.Mutex
 }
 
-func NewPing(threshold time.Duration) *Ping {
-	return &Ping{Threshold: threshold, Response: true}
+func NewPing(dur time.Duration) *Ping {
+	return &Ping{Duration: dur, Response: true}
 }
 func (ping *Ping) Start() {
 	ping.mu.Lock()
@@ -375,7 +366,7 @@ func (ping *Ping) Start() {
 	ping.mu.Unlock()
 
 	go func() {
-		timer := time.NewTimer(5 * time.Second)
+		timer := time.NewTimer(ping.Duration)
 		defer timer.Stop()
 
 		<-timer.C

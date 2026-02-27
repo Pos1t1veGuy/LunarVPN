@@ -20,9 +20,8 @@ type Client struct {
 	BlackList   []string
 	LayerChains []NetLayer
 	Stopping    chan struct{}
-	Session     *UdpSession
+	Session     Session
 
-	Ping *Ping
 	Endpoint
 }
 
@@ -39,7 +38,7 @@ func (client *Client) Connect(addr string, port int, login, password string, lay
 			Msg("Failed to resolve server address")
 	}
 
-	client.VirtualIP, err = client.Session.Open(client.ServerAddr, client.LayerChains, defaultLayer, layersIndexes, login, password)
+	client.VirtualIP, err = client.Session.Open(client, defaultLayer, layersIndexes, login, password)
 	if err != nil {
 		log.Error().
 			Err(err).
@@ -86,7 +85,7 @@ func (client *Client) ListenUnsafe() {
 	defer log.Info().
 		Str("state", "listening").
 		Msg("Client disconnected")
-	defer client.Session.Conn.Close()
+	defer client.Session.Close()
 	defer client.Tunnel.Stop()
 
 	go func() {
@@ -113,9 +112,6 @@ func (client *Client) ListenUnsafe() {
 			Str("localAddr", client.FullAddr).
 			Msg("Failed to create a local server")
 	}
-	defer client.Conn.Close()
-
-	go client.PingLoop(5 * time.Second)
 
 	go funcSafe("UDP=>Interface", func() {
 		buf := make([]byte, 1500)
@@ -126,23 +122,12 @@ func (client *Client) ListenUnsafe() {
 			default:
 			}
 
-			n, err := client.Session.Conn.Read(buf)
+			n, err := client.Session.Read(buf)
 			if err != nil || n == 0 {
-				time.Sleep(5 * time.Millisecond)
+				time.Sleep(1 * time.Millisecond)
 				continue
 			}
-
-			unwrapped, err := client.Session.NLayer.Unwrap(buf[:n])
-			if err != nil {
-				log.Error().
-					Err(err).
-					Str("state", "U2I").
-					Int("len", n).
-					Msg("(UDP=>Interface) Failed to unwrap packet")
-				time.Sleep(5 * time.Millisecond)
-				continue
-			}
-			packet, err := UnmarshalPacket(unwrapped)
+			packet, err := UnmarshalPacket(buf[:n])
 			if err != nil {
 				log.Debug().
 					Err(err).
@@ -150,7 +135,7 @@ func (client *Client) ListenUnsafe() {
 					Int("len", n).
 					Int("addrType", int(packet.AddrType)).
 					Msg("(UDP=>Interface) Cannot unmarshal packet")
-				time.Sleep(5 * time.Millisecond)
+				time.Sleep(1 * time.Millisecond)
 				continue
 			}
 			switch packet.AddrType {
@@ -180,14 +165,14 @@ func (client *Client) ListenUnsafe() {
 						Msg("(UDP=>Interface) Got API packet")
 				}
 			case 6:
-				time.Sleep(5 * time.Millisecond)
+				time.Sleep(1 * time.Millisecond)
 				continue
 
 			default:
-				time.Sleep(5 * time.Millisecond)
+				time.Sleep(1 * time.Millisecond)
 				continue
 			}
-			time.Sleep(5 * time.Millisecond)
+			time.Sleep(1 * time.Millisecond)
 		}
 	}, true)
 
@@ -202,7 +187,7 @@ func (client *Client) ListenUnsafe() {
 
 			n, err := client.Interface.Read(buffer)
 			if err != nil || n == 0 {
-				time.Sleep(5 * time.Millisecond)
+				time.Sleep(1 * time.Millisecond)
 				continue
 			}
 
@@ -222,7 +207,7 @@ func (client *Client) ListenUnsafe() {
 							Str("srcIP", ip4.SrcIP.String()).
 							Str("dstIP", ip4.DstIP.String()).
 							Msg("(UDP<=Interface) Failed to make a packet")
-						time.Sleep(5 * time.Millisecond)
+						time.Sleep(1 * time.Millisecond)
 						continue
 					}
 					bytes, err := MarshalPacket(packet)
@@ -233,11 +218,10 @@ func (client *Client) ListenUnsafe() {
 							Int("len", n).
 							Int("addrType", int(packet.AddrType)).
 							Msg("(UDP<=Interface) Failed to marshal packet")
-						time.Sleep(5 * time.Millisecond)
+						time.Sleep(1 * time.Millisecond)
 						continue
 					}
-					wrapped, err := client.Session.NLayer.Wrap(bytes)
-					if _, err = client.Session.Conn.Write(wrapped); err != nil {
+					if _, err = client.Session.Write(bytes); err != nil {
 						log.Debug().
 							Err(err).
 							Str("state", "I2U").
@@ -261,21 +245,21 @@ func (client *Client) ListenUnsafe() {
 				//	Str("state", "I2U").
 				//	Int("addrType", int(version)).
 				//	Msg("(UDP<=Interface) IPv6 not supported")
-				time.Sleep(5 * time.Millisecond)
+				time.Sleep(1 * time.Millisecond)
 				continue
 
 			default:
-				time.Sleep(5 * time.Millisecond)
+				time.Sleep(1 * time.Millisecond)
 				continue
 			}
-			time.Sleep(5 * time.Millisecond)
+			time.Sleep(1 * time.Millisecond)
 		}
 	}, true)
 
 	<-client.Stopping
 	packet, err := MakeDisconnectPacket(client.ServerAddr.IP, client.IP)
 	if err != nil {
-		client.SendPacket(packet, client.Session.NLayer)
+		client.SendPacket(packet)
 	}
 }
 
@@ -290,53 +274,6 @@ func (client *Client) Stop(msg string) {
 	default:
 		close(client.Stopping)
 		log.Info().Str("state", "stopping").Msg(msg)
-	}
-}
-
-func (client *Client) PingLoop(duration time.Duration) {
-	packet, err := MakePingPacket(client.VirtualIP, client.ServerAddr.IP)
-	if err != nil {
-		log.Error().
-			Err(err).
-			Str("state", "ping").
-			Msg("Failed to make a PING packet. Ping loop is disabled")
-		return
-	}
-	attempts := 0
-
-	for {
-		select {
-		case <-client.Stopping:
-			return
-		default:
-		}
-
-		client.Ping.Start()
-		client.SendPacket(packet, client.Session.NLayer)
-		log.Debug().
-			Str("state", "ping").
-			Msg("Ping server")
-
-		time.Sleep(duration)
-
-		if !client.Ping.Response {
-			if attempts < 3 {
-				attempts++
-				log.Error().
-					Str("state", "ping").
-					Int("try", attempts).
-					Msg("Server did not respond to ping request")
-			} else {
-				log.Error().
-					Str("state", "ping").
-					Int("try", attempts).
-					Msg("Server did not respond to ping request. Closing connection")
-				client.Stop("Server stopped responding")
-				return
-			}
-		} else {
-			attempts = 0
-		}
 	}
 }
 
