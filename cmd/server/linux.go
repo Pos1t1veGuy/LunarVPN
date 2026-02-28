@@ -19,7 +19,7 @@ func main() {
 		"error": {},
 	}
 
-	cidr := flag.String("cidr", "10.0.0.1/24", "application net interface CIDR")
+	cidr := flag.String("cidr", "10.0.0.1/16", "application net interface CIDR")
 	host := flag.String("host", "0.0.0.0", "application host")
 	logLevel := flag.String("logLevel", "info", "application log level (debug, info, warn, error)")
 	port := flag.Int("port", 5555, "application port")

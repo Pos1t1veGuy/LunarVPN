@@ -14,7 +14,7 @@ import (
 )
 
 type Client struct {
-	VirtualIP   net.IP
+	VirtualIP   *net.IP
 	ServerAddr  *net.UDPAddr
 	WhiteList   []string
 	BlackList   []string
@@ -53,12 +53,12 @@ func (client *Client) Connect(addr string, port int, login, password string, lay
 		Str("IP", client.VirtualIP.String()).
 		Msg("Client connected to server")
 
-	virtualIP4 := make(net.IP, len(client.VirtualIP))
-	copy(virtualIP4, client.VirtualIP)
+	virtualIP4 := make(net.IP, len(*client.VirtualIP))
+	copy(virtualIP4, *client.VirtualIP)
 	virtualIP4[3] = 0
-	gatewayIP4 := make(net.IP, len(client.VirtualIP))
-	copy(gatewayIP4, client.VirtualIP)
-	if client.VirtualIP[3] != 1 {
+	gatewayIP4 := make(net.IP, len(*client.VirtualIP))
+	copy(gatewayIP4, *client.VirtualIP)
+	if (*client.VirtualIP)[3] != 1 {
 		gatewayIP4[3] = 1
 	} else {
 		gatewayIP4[3] = 2
@@ -279,7 +279,7 @@ func (client *Client) Stop(msg string) {
 
 func (client *Client) FilterIPs4(packet *layers.IPv4) bool {
 	return !packet.DstIP.IsMulticast() && !packet.DstIP.IsLinkLocalUnicast() && !packet.DstIP.IsLoopback() &&
-		!packet.DstIP.Equal(net.IPv4bcast) && !packet.DstIP.Equal(client.VirtualIP) &&
+		!packet.DstIP.Equal(net.IPv4bcast) && !packet.DstIP.Equal(*client.VirtualIP) &&
 		!packet.DstIP.Equal(client.Net.IP) && !isSubnetBroadcast(packet.DstIP, client.Net)
 }
 func isSubnetBroadcast(ip net.IP, ipNet *net.IPNet) bool {
