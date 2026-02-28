@@ -29,7 +29,7 @@ func main() {
 		core.NewDebugLayer(false, false),
 		layers.NewXorLayer([]byte("LunarVPN")),
 	}
-	replaceStarterIfNewExists()
+	_ = replaceStarterIfNewExists()
 
 	appHost := flag.String("appHost", "127.0.0.1", "application host")
 	appPort := flag.Int("appPort", 8080, "application port")
@@ -87,7 +87,7 @@ func main() {
 	}
 
 	if _, ok := validLogLevels[*logLevel]; !ok {
-		fmt.Fprintf(os.Stderr, "invalid logLevel: %q\n", *logLevel)
+		_, _ = fmt.Fprintf(os.Stderr, "invalid logLevel: %q\n", *logLevel)
 		os.Exit(1)
 	}
 	core.InitLogger(*logLevel, *logFilePath)
@@ -115,7 +115,7 @@ func main() {
 			Msg("Failed to load whitelist")
 	}
 
-	cl := core.NewWindowsClient(*appHost, *appPort, whitelist, blacklist, lrs, core.NewUdpSession(5*time.Second))
+	cl := core.NewWindowsClient(*appHost, *appPort, whitelist, blacklist, lrs, core.NewUdpSessionPool(8, 5*time.Second))
 	connected := cl.Connect(*serHost, *serPort, *login, *password, layersIndexes, uint8(*defaultLayer))
 	if connected == true {
 		cl.Listen()
