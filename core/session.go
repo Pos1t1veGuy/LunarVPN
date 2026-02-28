@@ -17,21 +17,20 @@ type Session interface {
 	GetPing() Ping
 	SetIndex(index uint)
 
-	Open(client *Client, defaultLayer uint8, layersIndexes []uint8, login string, password string) (ip net.IP, err error)
+	Open(client *Client, defaultLayer uint8, layersIndexes []uint8, login string, password string) (ip *net.IP, err error)
 	Read(b []byte) (n int, err error)
 	Write(b []byte) (n int, err error)
-	Reopen(client *Client, defaultLayer uint8, layersIndexes []uint8, login string, password string) (ip net.IP, err error)
 	Close() error
 }
 
 type UdpSession struct {
-	Index  uint
-	Conn   net.Conn
-	Reader io.Reader
-	Writer io.Writer
-	NLayer NetLayer
+	Index     uint
+	Conn      net.Conn
+	NLayer    NetLayer
+	VirtualIP net.IP
 
 	Ping         Ping
+	Opened       bool
 	pingDuration time.Duration
 	Stopping     chan struct{}
 }
@@ -55,12 +54,12 @@ func (session *UdpSession) SetIndex(index uint) {
 	session.Index = index
 }
 
-func (session *UdpSession) Reopen(client *Client, defaultLayer uint8, layersIndexes []uint8, login, password string) (ip net.IP, err error) {
+func (session *UdpSession) Reopen(client *Client, defaultLayer uint8, layersIndexes []uint8, login, password string) (ip *net.IP, err error) {
 	_ = session.Close()
 	return session.Open(client, defaultLayer, layersIndexes, login, password)
 }
 
-func (session *UdpSession) Open(client *Client, defaultLayer uint8, layersIndexes []uint8, login, password string) (ip net.IP, err error) {
+func (session *UdpSession) Open(client *Client, defaultLayer uint8, layersIndexes []uint8, login, password string) (ip *net.IP, err error) {
 	for i := 0; i < 2; i++ {
 		ip, err = session.SingleOpen(client, defaultLayer, layersIndexes, login, password)
 		if err == nil {
@@ -71,17 +70,16 @@ func (session *UdpSession) Open(client *Client, defaultLayer uint8, layersIndexe
 	return nil, err
 }
 
-func (session *UdpSession) SingleOpen(client *Client, defaultLayer uint8, layersIndexes []uint8, login, password string) (ip net.IP, err error) {
+func (session *UdpSession) SingleOpen(client *Client, defaultLayer uint8, layersIndexes []uint8, login, password string) (ip *net.IP, err error) {
 	session.Stopping = make(chan struct{})
 	session.Conn, err = net.DialUDP("udp", nil, client.ServerAddr)
 	if err != nil {
 		return nil, err
 	}
 
-	_ = session.Conn.SetDeadline(time.Now().Add(3 * time.Second))
-	var virtualIP net.IP
+	_ = session.Conn.SetDeadline(time.Now().Add(5 * time.Second))
 	for attempt := 1; attempt <= 3; attempt++ {
-		virtualIP, session.NLayer, err = ClientHandshake(
+		session.VirtualIP, session.NLayer, err = ClientHandshake(
 			session,
 			client.LayerChains,
 			defaultLayer,
@@ -94,46 +92,54 @@ func (session *UdpSession) SingleOpen(client *Client, defaultLayer uint8, layers
 		time.Sleep(1 * time.Second)
 	}
 	if err != nil {
-		return nil, errors.New("all handshake attempts failed. Server is unavailable")
+		return nil, err
 	}
 	_ = session.Conn.SetDeadline(time.Time{})
 
-	pingPacket, err := MakePingPacket(virtualIP, client.ServerAddr.IP)
+	pingPacket, err := MakePingPacket(session.VirtualIP, client.ServerAddr.IP)
 	if err != nil {
 		return nil, err
 	}
 	session.Ping = NewDefaultPing(session.pingDuration)
 	go session.PingLoop(pingPacket, 5*time.Second)
+	session.Opened = true
 
-	return virtualIP, err
+	return &session.VirtualIP, err
 }
 func (session *UdpSession) Close() error {
 	close(session.Stopping)
 	if session.Conn != nil {
 		return session.Conn.Close()
 	}
+	session.Opened = false
 	return nil
 }
 
 func (session *UdpSession) Read(buf []byte) (n int, err error) {
-	subbuf := make([]byte, len(buf))
-	n, err = session.Conn.Read(subbuf)
-	if err != nil {
-		return n, err
+	if session.Opened {
+		subbuf := make([]byte, len(buf))
+		n, err = session.Conn.Read(subbuf)
+		if err != nil {
+			return n, err
+		}
+		unwrapped, err := session.NLayer.Unwrap(subbuf[:n])
+		if err != nil {
+			return n, err
+		}
+		copied := copy(buf, unwrapped)
+		return copied, nil
 	}
-	unwrapped, err := session.NLayer.Unwrap(subbuf[:n])
-	if err != nil {
-		return n, err
-	}
-	copied := copy(buf, unwrapped)
-	return copied, nil
+	return 0, errors.New("session closed")
 }
 func (session *UdpSession) Write(b []byte) (n int, err error) {
-	wrapped, err := session.NLayer.Wrap(b)
-	if err != nil {
-		return n, err
+	if session.Opened {
+		wrapped, err := session.NLayer.Wrap(b)
+		if err != nil {
+			return n, err
+		}
+		return session.Conn.Write(wrapped)
 	}
-	return session.Conn.Write(wrapped)
+	return 0, errors.New("session closed")
 }
 
 func (session *UdpSession) PingLoop(packet *Packet, duration time.Duration) {
@@ -146,13 +152,17 @@ func (session *UdpSession) PingLoop(packet *Packet, duration time.Duration) {
 		default:
 		}
 
+		time.Sleep(duration)
+
+		if !session.Opened {
+			continue
+		}
+
 		session.Ping.Start()
 		session.SendPacket(packet)
 		log.Debug().
 			Str("state", "ping").
 			Msg("Ping server")
-
-		time.Sleep(duration)
 
 		if !session.Ping.GetResponse() {
 			attempts++
@@ -171,57 +181,65 @@ func (session *UdpSession) PingLoop(packet *Packet, duration time.Duration) {
 }
 
 func (session *UdpSession) SendPacket(packet *Packet) {
-	bytes, err := MarshalPacket(packet)
-	if err != nil {
-		log.Debug().
-			Err(err).
-			Str("state", "SessionPacket").
-			Int("len", len(bytes)).
-			Int("AddrType", int(packet.AddrType)).
-			Msg("(UDP<=Interface) Failed to marshal packet")
-	}
+	if session.Opened {
+		bytes, err := MarshalPacket(packet)
+		if err != nil {
+			log.Debug().
+				Err(err).
+				Str("state", "SessionPacket").
+				Int("len", len(bytes)).
+				Int("AddrType", int(packet.AddrType)).
+				Msg("(UDP<=Interface) Failed to marshal packet")
+		}
 
-	if _, err = session.Write(bytes); err != nil {
-		log.Debug().
-			Err(err).
-			Str("state", "SessionPacket").
-			Int("len", len(bytes)).
-			Int("AddrType", int(packet.AddrType)).
-			Msg("(UDP<=Interface) Failed to send packet")
-	} else {
-		log.Debug().
-			Str("state", "SessionPacket").
-			Int("len", len(bytes)).
-			Int("AddrType", int(packet.AddrType)).
-			Msg("(UDP<=Interface) Sent a packet")
+		if _, err = session.Write(bytes); err != nil {
+			log.Debug().
+				Err(err).
+				Str("state", "SessionPacket").
+				Int("len", len(bytes)).
+				Int("AddrType", int(packet.AddrType)).
+				Msg("(UDP<=Interface) Failed to send packet")
+		} else {
+			log.Debug().
+				Str("state", "SessionPacket").
+				Int("len", len(bytes)).
+				Int("AddrType", int(packet.AddrType)).
+				Msg("(UDP<=Interface) Sent a packet")
+		}
 	}
 }
 
 type UdpSessionPool struct {
-	Sessions    []*UdpSession
-	MaxSessions uint
+	Index        uint
+	Conn         net.Conn
+	PingDuration time.Duration
+	Sessions     []*UdpSession
+	MaxSessions  uint
+	VirtualIP    net.IP
 
-	OpenSession   func(session Session, index uint) (ip net.IP, err error)
-	ReopenSession func(session Session) (ip net.IP, err error)
+	ReopenMgr     func() (ip *net.IP, err error)
+	OpenSession   func(session Session, index uint) (ip *net.IP, err error)
+	ReopenSession func(session Session) (ip *net.IP, err error)
 
 	Ping       Ping
+	Opened     bool
 	mu         sync.RWMutex
 	readBuffer chan []byte
 	Stopping   chan struct{}
-	UdpSession
 }
 
-func NewUdpSessionPool(maxSessions uint, pingDuration time.Duration) *UdpSessionPool {
+func NewUdpSessionPool(maxSessions uint, localPingDuration time.Duration, globalPingDuration time.Duration) *UdpSessionPool {
 	sessions := make([]*UdpSession, 0, maxSessions)
 
 	for i := uint(0); i < maxSessions; i++ {
-		sessions = append(sessions, NewUdpSession(pingDuration))
+		sessions = append(sessions, NewUdpSession(localPingDuration))
 	}
 	mgr := &UdpSessionPool{
-		Sessions:    sessions,
-		MaxSessions: maxSessions,
-		readBuffer:  make(chan []byte, 1024),
-		Stopping:    make(chan struct{}),
+		PingDuration: globalPingDuration,
+		Sessions:     sessions,
+		MaxSessions:  maxSessions,
+		readBuffer:   make(chan []byte, 1024),
+		Stopping:     make(chan struct{}),
 	}
 	mgr.Ping = NewPingGroup(sessions)
 	return mgr
@@ -238,12 +256,15 @@ func (mgr *UdpSessionPool) SetIndex(index uint) {
 	mgr.Index = index
 }
 
-func (mgr *UdpSessionPool) Reopen(client *Client, defaultLayer uint8, layersIndexes []uint8, login, password string) (ip net.IP, err error) {
+func (mgr *UdpSessionPool) Reopen() (ip *net.IP, err error) {
 	_ = mgr.Close()
-	return mgr.Open(client, defaultLayer, layersIndexes, login, password)
+	if mgr.Opened {
+		return mgr.ReopenMgr()
+	}
+	return nil, errors.New("UdpSessionPool has not been opened and can be REopened")
 }
 
-func (mgr *UdpSessionPool) Open(client *Client, defaultLayer uint8, layersIndexes []uint8, login, password string) (ip net.IP, err error) {
+func (mgr *UdpSessionPool) Open(client *Client, defaultLayer uint8, layersIndexes []uint8, login, password string) (ip *net.IP, err error) {
 	for i := 0; i < 2; i++ {
 		ip, err = mgr.SingleOpen(client, defaultLayer, layersIndexes, login, password)
 		if err == nil {
@@ -254,64 +275,49 @@ func (mgr *UdpSessionPool) Open(client *Client, defaultLayer uint8, layersIndexe
 	return nil, err
 }
 
-func (mgr *UdpSessionPool) SingleOpen(client *Client, defaultLayer uint8, layersIndexes []uint8, login, password string) (ip net.IP, err error) {
-	var virtualIP net.IP
+func (mgr *UdpSessionPool) SingleOpen(client *Client, defaultLayer uint8, layersIndexes []uint8, login, password string) (ip *net.IP, err error) {
 	var opened []*UdpSession
-	var mu sync.Mutex
-	var wg sync.WaitGroup
 
-	errCh := make(chan error, len(mgr.Sessions))
-	ipCh := make(chan net.IP, len(mgr.Sessions))
-
-	mgr.OpenSession = func(session Session, index uint) (ip net.IP, err error) {
+	mgr.OpenSession = func(session Session, index uint) (ip *net.IP, err error) {
 		session.SetIndex(index)
 		return session.Open(client, defaultLayer, layersIndexes, login, password)
 	}
-	mgr.ReopenSession = func(session Session) (ip net.IP, err error) {
-		return session.Reopen(client, defaultLayer, layersIndexes, login, password)
+	mgr.ReopenSession = func(session Session) (ip *net.IP, err error) {
+		_ = session.Close()
+		return session.Open(client, defaultLayer, layersIndexes, login, password)
+	}
+	mgr.ReopenMgr = func() (ip *net.IP, err error) {
+		ip, err = mgr.Open(client, defaultLayer, layersIndexes, login, password)
+		if err != nil {
+			return nil, err
+		}
+		mgr.VirtualIP = *ip
+		return ip, nil
 	}
 
 	for index, session := range mgr.Sessions {
-		wg.Add(1)
-
-		go func(s *UdpSession, i int) {
-			defer wg.Done()
-			virtualIP, err = mgr.OpenSession(session, uint(index))
-
-			ip, err = mgr.OpenSession(s, uint(i))
-			if err != nil {
-				errCh <- err
-				return
+		ip, err = mgr.OpenSession(session, uint(index))
+		if err != nil || ip == nil {
+			for _, s := range opened {
+				_ = s.Close()
+				return nil, err
 			}
-
-			mu.Lock()
-			opened = append(opened, s)
-			mu.Unlock()
-
-			ipCh <- ip
-
-		}(session, index)
-	}
-	wg.Wait()
-	close(errCh)
-	close(ipCh)
-
-	if len(errCh) > 0 {
-		for _, s := range opened {
-			_ = s.Close()
 		}
-		return nil, <-errCh
-	}
-	for ip = range ipCh {
-		virtualIP = ip
-		break
+
+		opened = append(opened, session)
 	}
 
 	for _, session := range mgr.Sessions {
 		go mgr.ReaderLoop(session)
 	}
-	go mgr.PingLoop(8 * time.Second)
-	return virtualIP, nil
+	go mgr.PingLoop(mgr.PingDuration)
+
+	mgr.Opened = true
+
+	if ip != nil {
+		mgr.VirtualIP = *ip
+	}
+	return ip, nil
 }
 func (mgr *UdpSessionPool) Close() error {
 	close(mgr.Stopping)
@@ -324,6 +330,7 @@ func (mgr *UdpSessionPool) Close() error {
 			err = e
 		}
 	}
+	mgr.Opened = false
 	return err
 }
 
@@ -437,19 +444,40 @@ func (mgr *UdpSessionPool) PacketAPI(session *UdpSession, packet *Packet) bool {
 }
 
 func (mgr *UdpSessionPool) PingLoop(duration time.Duration) {
+	attempts := 0
 	for {
+		time.Sleep(duration)
 		select {
 		case <-mgr.Stopping:
 			return
 		default:
 		}
 		value := mgr.Ping.Calculate()
-		log.Info().
-			Str("state", "ping").
-			Str("ping", value.Truncate(time.Millisecond).String()).
-			Msg("(UDP=>Interface) Average ping time")
+		if value > 0 {
+			attempts = 0
+			log.Info().
+				Str("state", "ping").
+				Str("ping", value.Truncate(time.Millisecond).String()).
+				Msg("(UDP=>Interface) Average ping time")
+		} else {
+			attempts++
+			log.Error().
+				Str("state", "ping").
+				Int("try", attempts).
+				Msg("(UDP=>Interface) Server did not respond to ping request")
 
-		time.Sleep(duration)
+			if attempts > 5 && attempts%3 == 0 {
+				tempSession := NewUdpSession(5 * time.Second)
+				_, err := mgr.OpenSession(tempSession, mgr.MaxSessions+1)
+				if err == nil {
+					_ = tempSession.Close()
+					_, err = mgr.ReopenMgr()
+					if err == nil {
+						time.Sleep(5 * time.Second)
+					}
+				}
+			}
+		}
 	}
 }
 
@@ -496,6 +524,7 @@ func (pg *PingGroup) Calculate() time.Duration {
 		count++
 	}
 	if count == 0 {
+		pg.Response = false
 		pg.Value = 0
 	} else {
 		pg.Value = sum / time.Duration(count)

@@ -6,6 +6,7 @@ import (
 	"errors"
 	"fmt"
 	"net"
+	"os"
 )
 
 type ClientHello struct {
@@ -190,6 +191,9 @@ func ClientHandshake(session Session, layerChains []NetLayer, defaultLayer uint8
 	_, err = session.GetConnection().Write(helloWrapped)
 
 	if err != nil {
+		if os.IsTimeout(err) {
+			return nil, nil, errors.New("server is unavailable (timeout)")
+		}
 		return nil, nil, err
 	}
 

@@ -1,6 +1,7 @@
 package core
 
 import (
+	"encoding/binary"
 	"fmt"
 	"net"
 	"os"
@@ -316,31 +317,48 @@ func (server *Server) DisconnectAll() {
 			Str("state", "closing").
 			Str("peer", peer.Addr.String()).
 			Msg("Disconnect packet sent")
+		delete(server.Peers, peer.Addr.String())
 	}
 }
 
 type Network struct {
-	Used    map[string]struct{}
-	Current net.IP
+	Used      map[string]struct{}
+	Current   net.IP
+	MaxLength uint
+
+	NetworkBits   uint32
+	MaskBits      uint32
+	BroadcastBits uint32
 	net.IPNet
 }
 
 func NewNetwork(cidr string) (*Network, error) {
 	ip, network, err := net.ParseCIDR(cidr)
+	networkBits := binary.BigEndian.Uint32(network.IP.To4())
+	maskBits := binary.BigEndian.Uint32(network.Mask)
+	broadcast := networkBits | (^maskBits)
+
+	ones, _ := network.Mask.Size()
+	maxLen := 1<<(32-ones) - 2
+
 	if err != nil {
 		return nil, err
 	}
 
 	return &Network{
-		Used:    map[string]struct{}{ip.String(): {}},
-		Current: ip,
-		IPNet:   *network,
+		Used:          map[string]struct{}{ip.String(): {}},
+		Current:       ip,
+		MaxLength:     uint(maxLen),
+		NetworkBits:   networkBits,
+		MaskBits:      maskBits,
+		BroadcastBits: broadcast,
+		IPNet:         *network,
 	}, nil
 }
 
 func (network *Network) Next() (net.IP, error) {
 	for {
-		if !network.Contains(network.Current) {
+		if len(network.Used) >= int(network.MaxLength) {
 			return nil, fmt.Errorf("no free IPs left")
 		}
 
@@ -356,16 +374,22 @@ func (network *Network) Next() (net.IP, error) {
 		}
 
 		network.increment()
+		time.Sleep(5 * time.Millisecond)
 	}
 }
 
 func (network *Network) increment() {
-	for i := len(network.Current) - 1; i >= 0; i-- {
-		network.Current[i]++
-		if network.Current[i] != 0 {
-			break
-		}
-	}
+	num := binary.BigEndian.Uint32(network.Current) + 1
+	hostPart := num & (^network.MaskBits)
+	incrementedNum := network.NetworkBits | hostPart
+
+	network.Current = intToIP(incrementedNum)
+}
+
+func intToIP(n uint32) net.IP {
+	ip := make(net.IP, 4)
+	binary.BigEndian.PutUint32(ip, n)
+	return ip
 }
 
 // сделать базовый httpws враппер; нжинкс
