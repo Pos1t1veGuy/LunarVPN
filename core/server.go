@@ -293,6 +293,31 @@ func (server *Server) Start(defaultLayer uint8) {
 	funcSafe("StartLoop", func() { server.StartUnsafe(defaultLayer) }, false)
 }
 
+func (server *Server) DisconnectPeer(peer *Peer) (err error) {
+	server.mu.Lock()
+	defer server.mu.Unlock()
+
+	packet, err := MakeDisconnectPacket(server.IP, peer.VirtualIP)
+	if err != nil {
+		log.Error().
+			Err(err).
+			Str("state", "closing").
+			Str("peer", peer.Addr.String()).
+			Msg("Failed to create disconnect packet")
+		return err
+	}
+
+	server.SendPacket(packet, peer.Addr, peer.NLChain)
+	log.Info().
+		Str("state", "closing").
+		Str("peer", peer.Addr.String()).
+		Msg("Disconnect packet sent")
+
+	delete(server.Peers, peer.Addr.String())
+	delete(server.Network.Used, peer.VirtualIP.String())
+	return nil
+}
+
 func (server *Server) DisconnectAll() {
 	server.mu.RLock()
 	defer server.mu.RUnlock()
@@ -301,29 +326,13 @@ func (server *Server) DisconnectAll() {
 		if peer == nil || peer.Addr == nil {
 			continue
 		}
-
-		packet, err := MakeDisconnectPacket(server.IP, peer.VirtualIP)
-		if err != nil {
-			log.Error().
-				Err(err).
-				Str("state", "closing").
-				Str("peer", peer.Addr.String()).
-				Msg("Failed to create disconnect packet")
-			continue
-		}
-
-		server.SendPacket(packet, peer.Addr, peer.NLChain)
-		log.Info().
-			Str("state", "closing").
-			Str("peer", peer.Addr.String()).
-			Msg("Disconnect packet sent")
-		delete(server.Peers, peer.Addr.String())
+		_ = server.DisconnectPeer(peer)
 	}
 }
 
 type Network struct {
 	Used      map[string]struct{}
-	Current   net.IP
+	Current   uint32
 	MaxLength uint
 
 	NetworkBits   uint32
@@ -334,20 +343,25 @@ type Network struct {
 
 func NewNetwork(cidr string) (*Network, error) {
 	ip, network, err := net.ParseCIDR(cidr)
+	if err != nil {
+		return nil, err
+	}
+
 	networkBits := binary.BigEndian.Uint32(network.IP.To4())
+	ipBits := binary.BigEndian.Uint32(ip.To4())
 	maskBits := binary.BigEndian.Uint32(network.Mask)
 	broadcast := networkBits | (^maskBits)
 
 	ones, _ := network.Mask.Size()
 	maxLen := 1<<(32-ones) - 2
 
-	if err != nil {
-		return nil, err
+	if ip[3] == 0 {
+		ip[3] = 2
 	}
 
 	return &Network{
-		Used:          map[string]struct{}{ip.String(): {}},
-		Current:       ip,
+		Used:          map[string]struct{}{ip.String(): {}, network.IP.String(): {}},
+		Current:       ipBits,
 		MaxLength:     uint(maxLen),
 		NetworkBits:   networkBits,
 		MaskBits:      maskBits,
@@ -359,31 +373,33 @@ func NewNetwork(cidr string) (*Network, error) {
 func (network *Network) Next() (net.IP, error) {
 	for {
 		if len(network.Used) >= int(network.MaxLength) {
+			fmt.Println(len(network.Used), int(network.MaxLength))
 			return nil, fmt.Errorf("no free IPs left")
 		}
 
-		ipStr := network.Current.String()
+		currentIP := intToIP(network.Current)
+		fmt.Println(1, currentIP)
+		ipStr := currentIP.String()
 		if _, exists := network.Used[ipStr]; !exists {
-			result := make(net.IP, len(network.Current))
-			copy(result, network.Current)
-
 			network.Used[ipStr] = struct{}{}
 			network.increment()
-
-			return result, nil
+			return currentIP, nil
 		}
+		fmt.Println(2, currentIP)
 
 		network.increment()
 		time.Sleep(5 * time.Millisecond)
+		fmt.Println(3, currentIP)
 	}
 }
 
 func (network *Network) increment() {
-	num := binary.BigEndian.Uint32(network.Current) + 1
-	hostPart := num & (^network.MaskBits)
-	incrementedNum := network.NetworkBits | hostPart
+	hostPart := (network.Current + 1) & (^network.MaskBits)
+	network.Current = network.NetworkBits | hostPart
 
-	network.Current = intToIP(incrementedNum)
+	if network.Current > network.BroadcastBits {
+		network.Current = network.NetworkBits + 1
+	}
 }
 
 func intToIP(n uint32) net.IP {
@@ -391,6 +407,3 @@ func intToIP(n uint32) net.IP {
 	binary.BigEndian.PutUint32(ip, n)
 	return ip
 }
-
-// сделать базовый httpws враппер; нжинкс
-// базу данных; сделать из впна микросервис докер; бота; дописать страничку

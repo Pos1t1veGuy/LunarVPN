@@ -458,24 +458,30 @@ func (mgr *UdpSessionPool) PingLoop(duration time.Duration) {
 			log.Info().
 				Str("state", "ping").
 				Str("ping", value.Truncate(time.Millisecond).String()).
-				Msg("(UDP=>Interface) Average ping time")
+				Msg("Average ping time")
 		} else {
 			attempts++
-			log.Error().
+			log.Debug().
 				Str("state", "ping").
 				Int("try", attempts).
-				Msg("(UDP=>Interface) Server did not respond to ping request")
+				Msg("Server did not respond to ping request")
 
-			if attempts > 5 && attempts%3 == 0 {
-				tempSession := NewUdpSession(5 * time.Second)
-				_, err := mgr.OpenSession(tempSession, mgr.MaxSessions+1)
-				if err == nil {
-					_ = tempSession.Close()
-					_, err = mgr.ReopenMgr()
+			if attempts > 3 {
+				if attempts%3 == 0 {
+					tempSession := NewUdpSession(5 * time.Second)
+					_, err := mgr.OpenSession(tempSession, mgr.MaxSessions+1)
 					if err == nil {
-						time.Sleep(5 * time.Second)
+						_ = tempSession.Close()
+						_, err = mgr.ReopenMgr()
+						if err == nil {
+							time.Sleep(5 * time.Second)
+						}
 					}
 				}
+				log.Error().
+					Str("state", "ping").
+					Int("try", attempts).
+					Msg("Server did not respond to ping request")
 			}
 		}
 	}

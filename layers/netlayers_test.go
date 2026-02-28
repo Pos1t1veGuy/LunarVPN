@@ -23,14 +23,14 @@ func TestNetLayersRoundTrip(t *testing.T) {
 		{
 			name: "xor",
 			layers: []core.NetLayer{
-				NewXorLayer(0x42),
+				NewXorLayer([]byte("LunarVPN")),
 			},
 			data: []byte("secret payload"),
 		},
 		{
 			name: "xor + debug",
 			layers: []core.NetLayer{
-				NewXorLayer(0x42),
+				NewXorLayer([]byte("123145dfgryh35y6243rg2fervtbh")),
 				core.NewDebugLayer(true, false),
 			},
 			data: []byte("secret payload"),
@@ -39,8 +39,8 @@ func TestNetLayersRoundTrip(t *testing.T) {
 			name: "debug + xor + xor",
 			layers: []core.NetLayer{
 				core.NewDebugLayer(true, false),
-				NewXorLayer(0xAA),
-				NewXorLayer(0xBB),
+				NewXorLayer([]byte("AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA")),
+				NewXorLayer([]byte("BBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBB")),
 			},
 			data: bytes.Repeat([]byte{0xAB}, 1024),
 		},

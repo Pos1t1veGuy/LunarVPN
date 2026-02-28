@@ -286,9 +286,7 @@ func (server *Server) PacketAPI(conn net.UDPConn, peer *Peer, packet *Packet, cl
 		switch packet.Rsv {
 		case [4]byte{0, 0, 0, 0}: // disconnect
 			if _, exists := server.Peers[strClientAddr]; exists {
-				server.mu.Lock()
-				delete(server.Peers, strClientAddr)
-				server.mu.Unlock()
+				_ = server.DisconnectPeer(peer)
 				log.Info().
 					Str("state", "API").
 					Str("peer", strClientAddr).
