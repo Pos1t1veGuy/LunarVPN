@@ -94,7 +94,7 @@ func NewLinuxServer(addr string, port int, CIDR string, LayerChains []NetLayer, 
 	gatewayIP4[3] = 1
 
 	return &Server{
-		Endpoint:      *NewEndpoint(addr, port, gatewayIP4.String(), CIDR, adapter, NewTunnel),
+		Endpoint:      *NewEndpoint(addr, port, CIDR, gatewayIP4.String(), adapter, NewTunnel),
 		Peers:         make(map[string]*Peer),
 		Cache:         cache.New(30*time.Minute, 10*time.Minute),
 		Network:       network,

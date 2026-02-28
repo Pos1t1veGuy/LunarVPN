@@ -478,6 +478,7 @@ func InitLogger(levelStr string, filename string) {
 				Str("state", "logSetup").
 				Msg("Cannot open log file")
 		}
+		defer file.Close()
 
 		out = io.MultiWriter(os.Stdout, file)
 	} else {
@@ -510,22 +511,56 @@ func funcSafe(name string, fn func(), autoRestart bool) {
 	func() {
 		defer func() {
 			if r := recover(); r != nil {
+				stack := formatStack(debug.Stack())
+				event := log.Error().
+					Str("goroutine", name).
+					Str("panic", fmt.Sprintf("%v", r))
+
 				if autoRestart {
+					event.Msg("goroutine panicked, restarting")
+					log.Error().Msg("\n" + stack)
 					funcSafe(name, fn, autoRestart)
-					log.Error().
-						Str("goroutine", name).
-						Interface("panic", r).
-						Bytes("stack", debug.Stack()).
-						Msg("goroutine panicked, restarting")
 				} else {
-					log.Error().
-						Str("goroutine", name).
-						Interface("panic", r).
-						Bytes("stack", debug.Stack()).
-						Msg("goroutine panicked and disabled")
+					event.Msg("goroutine panicked and disabled")
+					log.Error().Msg("\n" + stack)
 				}
 			}
 		}()
 		fn()
 	}()
+}
+
+func formatStack(raw []byte) string {
+	lines := strings.Split(string(raw), "\n")
+
+	var b strings.Builder
+	frameIndex := 0
+
+	for i := 0; i < len(lines)-1; i++ {
+		line := strings.TrimSpace(lines[i])
+
+		if strings.Contains(line, "runtime/") ||
+			strings.Contains(line, "runtime.") ||
+			strings.Contains(line, "debug.Stack") {
+			continue
+		}
+
+		if i+1 < len(lines) {
+			fileLine := strings.TrimSpace(lines[i+1])
+
+			if strings.Contains(fileLine, ".go:") {
+				frameIndex++
+				fmt.Fprintf(
+					&b,
+					"\n  #%d  %s\n     -> %s",
+					frameIndex,
+					line,
+					fileLine,
+				)
+				i++
+			}
+		}
+	}
+
+	return b.String()
 }

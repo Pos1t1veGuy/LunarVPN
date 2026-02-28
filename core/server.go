@@ -183,7 +183,7 @@ func (server *Server) StartUnsafe(defaultLayer uint8) {
 			if !found {
 				peer, err := server.Handshake(n, buf, clientAddr, defaultLayer, server.AuthSystem)
 				if err != nil || !peer.Handshaked {
-					log.Debug().
+					log.Error().
 						Err(err).
 						Int("len", n).
 						Str("state", "U2I").
@@ -289,7 +289,7 @@ func (server *Server) StartUnsafe(defaultLayer uint8) {
 }
 
 func (server *Server) Start(defaultLayer uint8) {
-	funcSafe("mainLoop", func() { server.StartUnsafe(defaultLayer) }, false)
+	funcSafe("StartLoop", func() { server.StartUnsafe(defaultLayer) }, false)
 }
 
 func (server *Server) DisconnectAll() {

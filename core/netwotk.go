@@ -333,19 +333,20 @@ func (client *Client) PacketAPI(conn net.UDPConn, serverAddr net.UDPAddr, packet
 		case [4]byte{0, 0, 0, 0}: // disconnect
 			client.Stop("(UDP=>Interface) Server disconnected you")
 		case [4]byte{0, 0, 0, 1}: // pong
-			ping := client.Session.GetPing()
-			ping.Calculate()
-			log.Info().
-				Str("state", "API").
-				Str("ping", ping.Value.Truncate(time.Millisecond).String()).
-				Msg("(UDP=>Interface) Pong received")
 		}
 		return true
 	}
 	return false
 }
 
-type Ping struct {
+type Ping interface {
+	Start()
+	Calculate() time.Duration
+	GetValue() time.Duration
+	GetResponse() bool
+}
+
+type DefaultPing struct {
 	TimeStart  time.Time
 	Calculated bool
 	Value      time.Duration
@@ -355,10 +356,16 @@ type Ping struct {
 	mu sync.Mutex
 }
 
-func NewPing(dur time.Duration) *Ping {
-	return &Ping{Duration: dur, Response: true}
+func NewDefaultPing(dur time.Duration) *DefaultPing {
+	return &DefaultPing{Duration: dur, Response: true}
 }
-func (ping *Ping) Start() {
+func (ping *DefaultPing) GetValue() time.Duration {
+	return ping.Value
+}
+func (ping *DefaultPing) GetResponse() bool {
+	return ping.Response
+}
+func (ping *DefaultPing) Start() {
 	ping.mu.Lock()
 	ping.Calculated = false
 	ping.TimeStart = time.Now()
@@ -379,7 +386,7 @@ func (ping *Ping) Start() {
 		}
 	}()
 }
-func (ping *Ping) Calculate() time.Duration {
+func (ping *DefaultPing) Calculate() time.Duration {
 	ping.mu.Lock()
 	defer ping.mu.Unlock()
 	ping.Calculated = true

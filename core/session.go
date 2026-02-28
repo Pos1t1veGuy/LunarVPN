@@ -14,7 +14,7 @@ import (
 
 type Session interface {
 	GetConnection() net.Conn
-	GetPing() *Ping
+	GetPing() Ping
 	SetIndex(index uint)
 
 	Open(client *Client, defaultLayer uint8, layersIndexes []uint8, login string, password string) (ip net.IP, err error)
@@ -31,21 +31,23 @@ type UdpSession struct {
 	Writer io.Writer
 	NLayer NetLayer
 
-	Ping     *Ping
-	Stopping chan struct{}
+	Ping         Ping
+	pingDuration time.Duration
+	Stopping     chan struct{}
 }
 
 func NewUdpSession(pingDuration time.Duration) *UdpSession {
 	return &UdpSession{
-		Ping:     NewPing(pingDuration),
-		Stopping: make(chan struct{}),
+		Ping:         NewDefaultPing(pingDuration),
+		pingDuration: pingDuration,
+		Stopping:     make(chan struct{}),
 	}
 }
 
 func (session *UdpSession) GetConnection() net.Conn {
 	return session.Conn
 }
-func (session *UdpSession) GetPing() *Ping {
+func (session *UdpSession) GetPing() Ping {
 	return session.Ping
 }
 
@@ -72,6 +74,9 @@ func (session *UdpSession) Open(client *Client, defaultLayer uint8, layersIndexe
 func (session *UdpSession) SingleOpen(client *Client, defaultLayer uint8, layersIndexes []uint8, login, password string) (ip net.IP, err error) {
 	session.Stopping = make(chan struct{})
 	session.Conn, err = net.DialUDP("udp", nil, client.ServerAddr)
+	if err != nil {
+		return nil, err
+	}
 
 	_ = session.Conn.SetDeadline(time.Now().Add(3 * time.Second))
 	var virtualIP net.IP
@@ -97,13 +102,17 @@ func (session *UdpSession) SingleOpen(client *Client, defaultLayer uint8, layers
 	if err != nil {
 		return nil, err
 	}
+	session.Ping = NewDefaultPing(session.pingDuration)
 	go session.PingLoop(pingPacket, 5*time.Second)
 
 	return virtualIP, err
 }
 func (session *UdpSession) Close() error {
 	close(session.Stopping)
-	return session.Conn.Close()
+	if session.Conn != nil {
+		return session.Conn.Close()
+	}
+	return nil
 }
 
 func (session *UdpSession) Read(buf []byte) (n int, err error) {
@@ -145,7 +154,7 @@ func (session *UdpSession) PingLoop(packet *Packet, duration time.Duration) {
 
 		time.Sleep(duration)
 
-		if !session.Ping.Response {
+		if !session.Ping.GetResponse() {
 			attempts++
 			log.Debug().
 				Str("state", "ping").
@@ -153,6 +162,10 @@ func (session *UdpSession) PingLoop(packet *Packet, duration time.Duration) {
 				Msg("Server did not respond to ping request")
 		} else {
 			attempts = 0
+			log.Debug().
+				Str("state", "ping").
+				Str("ping", session.Ping.GetValue().Truncate(time.Millisecond).String()).
+				Msg("(UDP=>Interface) Pong received")
 		}
 	}
 }
@@ -191,7 +204,7 @@ type UdpSessionPool struct {
 	OpenSession   func(session Session, index uint) (ip net.IP, err error)
 	ReopenSession func(session Session) (ip net.IP, err error)
 
-	Ping       *PingGroup
+	Ping       Ping
 	mu         sync.RWMutex
 	readBuffer chan []byte
 	Stopping   chan struct{}
@@ -214,6 +227,17 @@ func NewUdpSessionPool(maxSessions uint, pingDuration time.Duration) *UdpSession
 	return mgr
 }
 
+func (mgr *UdpSessionPool) GetConnection() net.Conn {
+	return mgr.Conn
+}
+func (mgr *UdpSessionPool) GetPing() Ping {
+	return mgr.Ping
+}
+
+func (mgr *UdpSessionPool) SetIndex(index uint) {
+	mgr.Index = index
+}
+
 func (mgr *UdpSessionPool) Reopen(client *Client, defaultLayer uint8, layersIndexes []uint8, login, password string) (ip net.IP, err error) {
 	_ = mgr.Close()
 	return mgr.Open(client, defaultLayer, layersIndexes, login, password)
@@ -221,7 +245,7 @@ func (mgr *UdpSessionPool) Reopen(client *Client, defaultLayer uint8, layersInde
 
 func (mgr *UdpSessionPool) Open(client *Client, defaultLayer uint8, layersIndexes []uint8, login, password string) (ip net.IP, err error) {
 	for i := 0; i < 2; i++ {
-		ip, err = mgr.SigleOpen(client, defaultLayer, layersIndexes, login, password)
+		ip, err = mgr.SingleOpen(client, defaultLayer, layersIndexes, login, password)
 		if err == nil {
 			return ip, nil
 		}
@@ -230,9 +254,14 @@ func (mgr *UdpSessionPool) Open(client *Client, defaultLayer uint8, layersIndexe
 	return nil, err
 }
 
-func (mgr *UdpSessionPool) SigleOpen(client *Client, defaultLayer uint8, layersIndexes []uint8, login, password string) (ip net.IP, err error) {
+func (mgr *UdpSessionPool) SingleOpen(client *Client, defaultLayer uint8, layersIndexes []uint8, login, password string) (ip net.IP, err error) {
 	var virtualIP net.IP
 	var opened []*UdpSession
+	var mu sync.Mutex
+	var wg sync.WaitGroup
+
+	errCh := make(chan error, len(mgr.Sessions))
+	ipCh := make(chan net.IP, len(mgr.Sessions))
 
 	mgr.OpenSession = func(session Session, index uint) (ip net.IP, err error) {
 		session.SetIndex(index)
@@ -243,17 +272,45 @@ func (mgr *UdpSessionPool) SigleOpen(client *Client, defaultLayer uint8, layersI
 	}
 
 	for index, session := range mgr.Sessions {
-		virtualIP, err = mgr.OpenSession(session, uint(index))
-		opened = append(opened, session)
+		wg.Add(1)
 
-		if err != nil {
-			for _, s := range opened {
-				_ = s.Close()
+		go func(s *UdpSession, i int) {
+			defer wg.Done()
+			virtualIP, err = mgr.OpenSession(session, uint(index))
+
+			ip, err = mgr.OpenSession(s, uint(i))
+			if err != nil {
+				errCh <- err
+				return
 			}
-			return nil, err
+
+			mu.Lock()
+			opened = append(opened, s)
+			mu.Unlock()
+
+			ipCh <- ip
+
+		}(session, index)
+	}
+	wg.Wait()
+	close(errCh)
+	close(ipCh)
+
+	if len(errCh) > 0 {
+		for _, s := range opened {
+			_ = s.Close()
 		}
+		return nil, <-errCh
+	}
+	for ip = range ipCh {
+		virtualIP = ip
+		break
+	}
+
+	for _, session := range mgr.Sessions {
 		go mgr.ReaderLoop(session)
 	}
+	go mgr.PingLoop(8 * time.Second)
 	return virtualIP, nil
 }
 func (mgr *UdpSessionPool) Close() error {
@@ -308,7 +365,7 @@ func (mgr *UdpSessionPool) FilterSessions() []*UdpSession {
 			continue
 		}
 
-		if session.Ping.Response {
+		if session.Ping.GetResponse() {
 			alive = append(alive, session)
 		} else {
 			dead = append(dead, session)
@@ -316,7 +373,7 @@ func (mgr *UdpSessionPool) FilterSessions() []*UdpSession {
 	}
 
 	sort.Slice(alive, func(i, j int) bool {
-		return alive[i].Ping.Value < alive[j].Ping.Value
+		return alive[i].Ping.GetValue() < alive[j].Ping.GetValue()
 	})
 
 	return append(alive, dead...)
@@ -346,12 +403,12 @@ func (mgr *UdpSessionPool) ReaderLoop(session *UdpSession) {
 			time.Sleep(1 * time.Millisecond)
 			continue
 		}
-		mgr.PacketAPI(session, packet)
-
-		select {
-		case mgr.readBuffer <- bytes:
-		case <-mgr.Stopping:
-			return
+		if !mgr.PacketAPI(session, packet) {
+			select {
+			case mgr.readBuffer <- bytes:
+			case <-mgr.Stopping:
+				return
+			}
 		}
 
 		time.Sleep(1 * time.Millisecond)
@@ -367,17 +424,33 @@ func (mgr *UdpSessionPool) PacketAPI(session *UdpSession, packet *Packet) bool {
 				Uint("ID", session.Index).
 				Msg("(UDP=>Interface) Server disconnected one session")
 		case [4]byte{0, 0, 0, 1}: // pong
-			ping := session.GetPing()
-			ping.Calculate()
-			log.Info().
+			value := session.GetPing().Calculate()
+			log.Debug().
 				Str("state", "SessionAPI").
 				Uint("ID", session.Index).
-				Str("ping", ping.Value.Truncate(time.Millisecond).String()).
+				Str("ping", value.Truncate(time.Millisecond).String()).
 				Msg("(UDP=>Interface) Pong received to one session")
 		}
 		return true
 	}
 	return false
+}
+
+func (mgr *UdpSessionPool) PingLoop(duration time.Duration) {
+	for {
+		select {
+		case <-mgr.Stopping:
+			return
+		default:
+		}
+		value := mgr.Ping.Calculate()
+		log.Info().
+			Str("state", "ping").
+			Str("ping", value.Truncate(time.Millisecond).String()).
+			Msg("(UDP=>Interface) Average ping time")
+
+		time.Sleep(duration)
+	}
 }
 
 type PingGroup struct {
@@ -391,6 +464,13 @@ func NewPingGroup(sessions []*UdpSession) *PingGroup {
 	return &PingGroup{Sessions: sessions}
 }
 
+func (pg *PingGroup) GetValue() time.Duration {
+	return pg.Value
+}
+func (pg *PingGroup) GetResponse() bool {
+	return pg.Response
+}
+
 func (pg *PingGroup) Start() {
 	pg.mu.Lock()
 	defer pg.mu.Unlock()
@@ -400,7 +480,7 @@ func (pg *PingGroup) Start() {
 	pg.Response = false
 }
 
-func (pg *PingGroup) Calculate() {
+func (pg *PingGroup) Calculate() time.Duration {
 	pg.mu.Lock()
 	defer pg.mu.Unlock()
 	pg.Response = true
@@ -412,12 +492,7 @@ func (pg *PingGroup) Calculate() {
 		if session.Ping == nil {
 			continue
 		}
-		session.Ping.Calculate()
-		if !session.Ping.Response {
-			continue
-		}
-
-		sum += session.Ping.Value
+		sum += session.Ping.GetValue()
 		count++
 	}
 	if count == 0 {
@@ -425,4 +500,6 @@ func (pg *PingGroup) Calculate() {
 	} else {
 		pg.Value = sum / time.Duration(count)
 	}
+
+	return pg.Value
 }
