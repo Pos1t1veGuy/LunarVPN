@@ -292,26 +292,27 @@ func (tunnel *Tunnel) Start(interfaceIP string) error {
 				}
 			}
 			for _, addr := range tunnel.Whitelist {
-				ip := net.ParseIP(addr)
-				if ip != nil && ip.IsGlobalUnicast() && !contains(tunnel.Blacklist, addr) {
-					ExecCmd("route", "add", addr, "mask", "255.255.255.255", gatewayIP, "metric", "1",
-						"if", strconv.Itoa(curIface.Index))
-					log.Info().
-						Str("state", "configTunnel").
-						Str("addr", addr).
-						Msg("Routed IP into tunnel")
-				} else if strings.Contains(addr, ".") {
-					dots := strings.Split(addr, ".")
-					if dots[len(dots)-1] == "exe" {
-						// application
+				if !contains(tunnel.Blacklist, addr) {
+					ip := net.ParseIP(addr)
+					if ip != nil && ip.IsGlobalUnicast() {
+						ExecCmd("route", "add", addr, "mask", "255.255.255.255", gatewayIP, "metric", "1",
+							"if", strconv.Itoa(curIface.Index))
+						log.Info().
+							Str("state", "configTunnel").
+							Str("addr", addr).
+							Msg("Routed IP into tunnel")
+						//} else if strings.Contains(addr, ".") {
+						//	if strings.HasSuffix(strings.ToLower(addr), ".exe") { // application
+						//
+						//	} else { // domain
+						//
+						//	}
 					} else {
-						// domain
+						log.Error().
+							Str("state", "configTunnel").
+							Str("addr", addr).
+							Msg("Failed to parse IP address")
 					}
-				} else {
-					log.Error().
-						Str("state", "configTunnel").
-						Str("addr", addr).
-						Msg("Failed to parse IP address")
 				}
 			}
 			// add dns route

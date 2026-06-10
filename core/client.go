@@ -137,7 +137,6 @@ func (client *Client) ListenUnsafe() {
 					Err(err).
 					Str("state", "N2I").
 					Int("len", n).
-					Int("addrType", int(packet.AddrType)).
 					Msg("(Network=>Interface) Cannot unmarshal packet")
 				continue
 			}

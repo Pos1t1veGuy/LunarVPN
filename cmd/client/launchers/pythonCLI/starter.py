@@ -15,10 +15,37 @@ author = 'Pos1t1veGuy'
 repo = 'LunarVPN'
 client = 'client.exe'
 updater = 'updater.exe'
-config_file = ''#'profile.lunar'
+config_file = 'profile.lunar'
 RELEASE = 'commercial'
 REPO_URL = f'https://api.github.com/repos/{author}/{repo}'
 BASE_DIR = Path(sys.executable if getattr(sys, 'frozen', False) else __file__).parent
+default_config = '''// Connection configuration
+
+host=""
+port=0
+login="admin"
+password="admin"
+
+blacklist="blacklist.txt"
+whitelist="whitelist.txt"
+
+// Type of connection to server (udp, udpPool, tcp, tcpPool). "Pool" is 2-8 connections simultaneously
+connType="udpPool"
+
+// Type of HANDSHAKE encryption. 0: Debug; 1: Xor (use -listLayers to view all)
+defaultLayer=1
+// Type of CONNECTION encryption. Comma-separated layer indexes, e.g. 1,4,5 (use -listLayers to view all)
+layers=1
+
+// Application log level (debug, info, warn, error)
+logLevel="info"
+// Path to logfile (by default logfile="", so it is disabled)
+logfile=""
+
+// Local server address
+appHost="127.0.0.1"
+appPort=8080
+'''
 
 
 def is_admin() -> bool:
@@ -165,18 +192,19 @@ if __name__ == '__main__':
         if not '--update_skip' in sys.argv:
             check_updates()
 
-        if os.path.isfile(config_file):
-            print('[+] Running with profile config...')
-            parameters = ' --'.join(open(config_file, 'r').read().split('\n'))
-            os.system(
-                f'{client} --{parameters} ' + ' '.join(sys.argv[1:]).replace('--py', '').replace('--update_skip', '')
-            )
-            input('[+] Press ENTER to exit. ')
-        else:
-            print('[+] Running without profile config...')
-            os.system(client)
-            input('[+] Press ENTER to exit. ')
-            #raise Exception(f'profile config not found, looking for a "{config_file}" file. Press ENTER to close the program...')
+        if not os.path.isfile(config_file):
+            print(f'[+] Created a default config file "{config_file}"')
+            print(f'[w] You need to specify "host" and "post" of LunarVPN server in config "{config_file}", default config contains empty values')
+            open(config_file, 'w').write(default_config)
+
+        print('[+] Running with profile config...')
+        parameters = ' --'.join([
+            line for line in open(config_file, 'r').read().split('\n')
+            if not (line.startswith('#') or line.startswith('//')) and line != ""
+        ])
+        os.system(f'{client} --{parameters} ' + ' '.join([ argv for argv in sys.argv[1:] if not argv == '--update_skip' ]))
+
+        input('[+] Press ENTER to exit. ')
 
     except KeyboardInterrupt:
         pass

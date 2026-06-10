@@ -39,8 +39,8 @@ func main() {
 
 	appHost := flag.String("appHost", "127.0.0.1", "application host")
 	appPort := flag.Int("appPort", 8080, "application port")
-	serHost := flag.String("host", "194.41.113.111", "server host")
-	serPort := flag.Int("port", 5555, "server port")
+	serHost := flag.String("host", "", "server host")
+	serPort := flag.Int("port", 0, "server port")
 	login := flag.String("login", "admin", "user login")
 	password := flag.String("password", "admin", "user password")
 	logLevel := flag.String("logLevel", "info", "application log level (debug, info, warn, error)")
@@ -78,7 +78,7 @@ func main() {
 	logFilePath := flag.String(
 		"logfile",
 		"",
-		"path to logfile file (by default logfile=\"\", so it is disabled)",
+		"path to logfile (by default logfile=\"\", so it is disabled)",
 	)
 	flag.Parse()
 	if *version {
@@ -95,12 +95,14 @@ func main() {
 
 	if _, ok := validLogLevels[*logLevel]; !ok {
 		_, _ = fmt.Fprintf(os.Stderr, "invalid logLevel: %q\n", *logLevel)
+		flag.Usage()
 		os.Exit(1)
 	}
 	core.InitLogger(*logLevel, *logFilePath)
 
 	if _, ok := validConnTypes[*connType]; !ok {
 		_, _ = fmt.Fprintf(os.Stderr, "invalid connType: %q\n", *connType)
+		flag.Usage()
 		os.Exit(1)
 	}
 
@@ -117,6 +119,7 @@ func main() {
 			Str("state", "whiteListSetup").
 			Str("path", *wlPath).
 			Msg("Failed to load whitelist")
+		flag.Usage()
 	}
 	blacklist, err := loadListFile(*blPath, "# Place IPs line by line to include them to routing.\n\n")
 	if err != nil {
@@ -125,6 +128,13 @@ func main() {
 			Str("state", "whiteListSetup").
 			Str("path", *blPath).
 			Msg("Failed to load whitelist")
+		flag.Usage()
+	}
+
+	if *serHost == "" || *serPort == 0 {
+		_, _ = fmt.Fprintf(os.Stderr, "Error: both -host and -port must be specified\n\n")
+		flag.Usage()
+		os.Exit(1)
 	}
 
 	cl := core.NewWindowsClient(*appHost, *appPort, whitelist, blacklist, lrs, validConnTypes[*connType])
