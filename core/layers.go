@@ -60,7 +60,7 @@ func NewDebugLayer(showLen bool, showContent bool) *DebugLayer {
 }
 
 func (debug *DebugLayer) log(direction string, data []byte) {
-	info := log.Info().
+	info := log.Debug().
 		Str("state", "debugLayer").
 		Str("direction", direction)
 

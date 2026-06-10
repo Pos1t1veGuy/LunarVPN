@@ -16,7 +16,7 @@ import (
 	"github.com/rs/zerolog/log"
 )
 
-const CurrentVersion = "1.0.1"
+const CurrentVersion = "1.0.2"
 
 func main() {
 	validLogLevels := map[string]struct{}{
@@ -24,6 +24,12 @@ func main() {
 		"info":  {},
 		"warn":  {},
 		"error": {},
+	}
+	validConnTypes := map[string]core.Session{
+		"udp":     core.NewUdpSession(5 * time.Second),
+		"udpPool": core.NewUdpSessionPool(8, 5*time.Second, 4*time.Second),
+		"tcp":     core.NewTcpSession(5 * time.Second),
+		"tcpPool": core.NewTcpSessionPool(8, 5*time.Second, 4*time.Second),
 	}
 	lrs := []core.NetLayer{
 		core.NewDebugLayer(false, false),
@@ -38,15 +44,16 @@ func main() {
 	login := flag.String("login", "admin", "user login")
 	password := flag.String("password", "admin", "user password")
 	logLevel := flag.String("logLevel", "info", "application log level (debug, info, warn, error)")
+	connType := flag.String("connType", "udpPool", "type of connection to server (udp, udpPool, tcp, tcpPool)")
 	defaultLayer := flag.Int(
 		"defaultLayer",
 		1,
-		"layer using to handshake (use -listLayers to view, by default -defaultLayer=1)",
+		"layer using to handshake (use -listLayers to view, by default using Xor -defaultLayer=1)",
 	)
 	layersArg := flag.String(
 		"layers",
 		"1",
-		"comma-separated layer indexes, e.g. 1,4,5 (use -listLayers to view, by default -laysers=1)",
+		"comma-separated layer indexes, e.g. 1,4,5 (use -listLayers to view, by default using Xor -laysers=1)",
 	)
 	listLayers := flag.Bool(
 		"listLayers",
@@ -92,6 +99,11 @@ func main() {
 	}
 	core.InitLogger(*logLevel, *logFilePath)
 
+	if _, ok := validConnTypes[*connType]; !ok {
+		_, _ = fmt.Fprintf(os.Stderr, "invalid connType: %q\n", *connType)
+		os.Exit(1)
+	}
+
 	layersIndexes, err := parseLayers(*layersArg, lrs)
 	if err != nil {
 		fmt.Println(err)
@@ -115,7 +127,7 @@ func main() {
 			Msg("Failed to load whitelist")
 	}
 
-	cl := core.NewWindowsClient(*appHost, *appPort, whitelist, blacklist, lrs, core.NewUdpSessionPool(8, 5*time.Second, 4*time.Second))
+	cl := core.NewWindowsClient(*appHost, *appPort, whitelist, blacklist, lrs, validConnTypes[*connType])
 	connected := cl.Connect(*serHost, *serPort, *login, *password, layersIndexes, uint8(*defaultLayer))
 	if connected == true {
 		cl.Listen()

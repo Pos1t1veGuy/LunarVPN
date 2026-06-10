@@ -7,6 +7,7 @@ import (
 	"fmt"
 	"net"
 	"os"
+	"time"
 )
 
 type ClientHello struct {
@@ -175,91 +176,110 @@ func UnmarshalServerHello(data []byte) (*ServerHello, error) {
 	return sh, nil
 }
 
-func ClientHandshake(session Session, layerChains []NetLayer, defaultLayer uint8, layersIndexes []uint8, authData []byte) (net.IP, NetLayer, error) {
-	clientHello := NewClientHello(layersIndexes, authData)
-	helloBytes, err := MarshalClientHello(clientHello)
-	handshakeLayer := layerChains[defaultLayer]
+func ClientHandshake(
+	session Session, dialFunc func() error, layerChains []NetLayer, defaultLayer uint8, layersIndexes []uint8, authData []byte,
+) (ip net.IP, nl NetLayer, e error) {
 
-	if err != nil {
-		return nil, nil, err
-	}
-
-	helloWrapped, err := handshakeLayer.Wrap(helloBytes)
-	if err != nil {
-		return nil, nil, err
-	}
-	_, err = session.GetConnection().Write(helloWrapped)
-
-	if err != nil {
-		if os.IsTimeout(err) {
-			return nil, nil, errors.New("server is unavailable (timeout)")
-		}
-		return nil, nil, err
-	}
-
-	buf := make([]byte, 1024)
-
-	for {
-		n, err := session.GetConnection().Read(buf)
-		if err != nil {
-			return nil, nil, err
-		}
-		helloUnwrapped, err := handshakeLayer.Wrap(buf[:n])
-		if err != nil {
-			return nil, nil, err
-		}
-		serverHello, err := UnmarshalServerHello(helloUnwrapped)
-		if err != nil {
-			return nil, nil, err
-		}
-
-		if serverHello.ServerResponse&ServerRespPacketValid == 0 {
-			return nil, nil, errors.New("client packet is invalid")
-		}
-		if serverHello.ServerResponse&ServerRespAuthOK == 0 {
-			return nil, nil, errors.New("server auth failed")
-		}
-		if serverHello.ServerResponse&ServerRespChainOK == 0 {
-			return nil, nil, errors.New("server refused NetLayer chain")
-		}
-		if serverHello.ServerResponse&ServerRespServerError != 0 {
-			return nil, nil, errors.New("server error")
-		}
-
-		if serverHello.AssignedIP.Equal(net.IPv4zero) {
-			return nil, nil, errors.New("server assigned zero IP")
-		}
-		ip4 := serverHello.AssignedIP.To4()
-		if ip4 == nil {
-			return nil, nil, fmt.Errorf("server assigned invalid IP")
-		}
-
-		ctx, err := DeriveSessionContext(clientHello, serverHello)
-		if err != nil {
-			return nil, nil, err
-		}
-
-		layersToBuild := make([]NetLayer, 0, len(clientHello.Chain))
-		for i := 0; i < len(clientHello.Chain); i++ {
-			idx := int(clientHello.Chain[i])
-			if idx >= len(layerChains) {
-				return nil, nil, fmt.Errorf("invalid layer index: %d", idx)
-			}
-			layersToBuild = append(layersToBuild, layerChains[idx].Clone())
-		}
-		chain := BuildNetLayers(layersToBuild...)
-
-		for layer := chain; layer != nil; layer = layer.GetNext() {
-			if err = layer.Init(ctx); err != nil {
+	for attempts := 0; attempts < 5; attempts++ {
+		ip, nl, e = func() (net.IP, NetLayer, error) {
+			err := dialFunc()
+			if err != nil {
 				return nil, nil, err
 			}
-		}
+			_ = session.GetConnection().SetReadDeadline(time.Now().Add(3 * time.Second))
 
-		return ip4, chain, nil
+			clientHello := NewClientHello(layersIndexes, authData)
+			helloBytes, err := MarshalClientHello(clientHello)
+			handshakeLayer := layerChains[defaultLayer]
+
+			if err != nil {
+				return nil, nil, err
+			}
+
+			helloWrapped, err := handshakeLayer.Wrap(helloBytes)
+			if err != nil {
+				return nil, nil, err
+			}
+			_, err = session.GetConnection().Write(helloWrapped)
+
+			if err != nil {
+				if os.IsTimeout(err) {
+					return nil, nil, errors.New("server is unavailable (timeout)")
+				}
+				return nil, nil, err
+			}
+
+			buf := make([]byte, 1024)
+
+			n, err := session.GetConnection().Read(buf)
+			if err != nil {
+				return nil, nil, err
+			}
+			helloUnwrapped, err := handshakeLayer.Unwrap(buf[:n])
+			if err != nil {
+				return nil, nil, err
+			}
+			serverHello, err := UnmarshalServerHello(helloUnwrapped)
+			if err != nil {
+				return nil, nil, err
+			}
+
+			if serverHello.ServerResponse&ServerRespPacketValid == 0 {
+				return nil, nil, errors.New("client packet is invalid")
+			}
+			if serverHello.ServerResponse&ServerRespAuthOK == 0 {
+				return nil, nil, errors.New("server auth failed")
+			}
+			if serverHello.ServerResponse&ServerRespChainOK == 0 {
+				return nil, nil, errors.New("server refused NetLayer chain")
+			}
+			if serverHello.ServerResponse&ServerRespServerError != 0 {
+				return nil, nil, errors.New("server error")
+			}
+
+			if serverHello.AssignedIP.Equal(net.IPv4zero) {
+				return nil, nil, errors.New("server assigned zero IP")
+			}
+			ip4 := serverHello.AssignedIP.To4()
+			if ip4 == nil {
+				return nil, nil, fmt.Errorf("server assigned invalid IP")
+			}
+
+			ctx, err := DeriveSessionContext(clientHello, serverHello)
+			if err != nil {
+				return nil, nil, err
+			}
+
+			layersToBuild := make([]NetLayer, 0, len(clientHello.Chain))
+			for i := 0; i < len(clientHello.Chain); i++ {
+				idx := int(clientHello.Chain[i])
+				if idx >= len(layerChains) {
+					return nil, nil, fmt.Errorf("invalid layer index: %d", idx)
+				}
+				layersToBuild = append(layersToBuild, layerChains[idx].Clone())
+			}
+			chain := BuildNetLayers(layersToBuild...)
+
+			for layer := chain; layer != nil; layer = layer.GetNext() {
+				if err = layer.Init(ctx); err != nil {
+					return nil, nil, err
+				}
+			}
+
+			return ip4, chain, nil
+		}()
+		if e == nil {
+			break
+		}
+		time.Sleep(50 * time.Millisecond)
 	}
+	_ = session.GetConnection().SetReadDeadline(time.Time{})
+	return ip, nl, e
 }
 
-func (server *Server) Handshake(n int, buf []byte, addr *net.UDPAddr, defaultLayer uint8, auth Authenticator) (*Peer, error) {
+func (server *Server) Handshake(n int, buf []byte, addr *Address, defaultLayer uint8, auth Authenticator,
+	write func([]byte) (int, error)) (*Peer, error) {
+
 	sendResponse := func(response *ServerHello) error {
 		serverHello, sendErr := MarshalServerHello(response)
 		if sendErr != nil {
@@ -269,7 +289,7 @@ func (server *Server) Handshake(n int, buf []byte, addr *net.UDPAddr, defaultLay
 		if sendErr != nil {
 			return sendErr
 		}
-		if _, sendErr = server.Conn.WriteToUDP(helloWrapped, addr); sendErr != nil {
+		if _, sendErr = write(helloWrapped); sendErr != nil {
 			return sendErr
 		}
 		return nil
@@ -277,17 +297,17 @@ func (server *Server) Handshake(n int, buf []byte, addr *net.UDPAddr, defaultLay
 
 	helloUnwrapped, err := server.LayerChains[defaultLayer].Unwrap(buf[:n])
 	if err != nil {
-		return nil, err
+		return server.AnonymousPeer, err
 	}
 	clientHello, err := UnmarshalClientHello(helloUnwrapped)
 	if err != nil {
 		_ = sendResponse(NewServerHello(net.IPv4zero, false, false, false, false))
-		return nil, err
+		return server.AnonymousPeer, err
 	}
 
 	if !auth.Authenticate(clientHello) {
 		_ = sendResponse(NewServerHello(net.IPv4zero, true, false, false, false))
-		return nil, fmt.Errorf("invalid login or password: %v", clientHello)
+		return server.AnonymousPeer, fmt.Errorf("invalid login or password: %v", clientHello)
 	}
 
 	layersToBuild := make([]NetLayer, 0, len(clientHello.Chain))
@@ -295,7 +315,7 @@ func (server *Server) Handshake(n int, buf []byte, addr *net.UDPAddr, defaultLay
 		idx := int(clientHello.Chain[i])
 		if idx >= len(server.LayerChains) {
 			_ = sendResponse(NewServerHello(net.IPv4zero, true, true, false, false))
-			return nil, fmt.Errorf("invalid layer index: %d", idx)
+			return server.AnonymousPeer, fmt.Errorf("invalid layer index: %d", idx)
 		}
 		layersToBuild = append(layersToBuild, server.LayerChains[idx].Clone())
 	}
@@ -304,27 +324,27 @@ func (server *Server) Handshake(n int, buf []byte, addr *net.UDPAddr, defaultLay
 	virtualIP, err := server.Network.Next()
 	if err != nil {
 		_ = sendResponse(NewServerHello(net.IPv4zero, true, true, true, true))
-		return nil, fmt.Errorf("get next virtual ip failed: %v", err)
+		return server.AnonymousPeer, fmt.Errorf("get next virtual ip failed: %v", err)
 	}
 	successResponse := NewServerHello(virtualIP, true, true, true, false)
 
 	ctx, err := DeriveSessionContext(clientHello, successResponse)
 	if err != nil {
 		_ = sendResponse(NewServerHello(net.IPv4zero, true, true, true, true))
-		return nil, err
+		return server.AnonymousPeer, err
 	}
 
 	for layer := chain; layer != nil; layer = layer.GetNext() {
 		if err = layer.Init(ctx); err != nil {
 			_ = sendResponse(NewServerHello(net.IPv4zero, true, true, true, true))
-			return nil, err
+			return server.AnonymousPeer, err
 		}
 	}
 
 	err = sendResponse(successResponse)
 	if err != nil {
 		_ = sendResponse(NewServerHello(net.IPv4zero, true, true, true, true))
-		return nil, fmt.Errorf("send ServerHello failed: %v", err)
+		return server.AnonymousPeer, fmt.Errorf("send ServerHello failed: %v", err)
 	}
 	peer := NewPeer(virtualIP, addr, chain, ctx, true)
 
@@ -350,3 +370,131 @@ func DeriveSessionContext(ch *ClientHello, sh *ServerHello) (*SessionContext, er
 		MasterSecret: h.Sum(nil),
 	}, nil
 }
+
+/*
+[+] Checking updates...
+[+] Running LunarVPN client 1.0.1 - latest
+[+] Running without profile config...
+attempt 0 sessionIndex = 0
+clienthello sessionIndex = 0
+readingResponse sessionIndex = 0 err = read udp 192.168.1.14:59938->194.41.113.111:5555: i/o timeout
+attempt 1 sessionIndex = 0
+clienthello sessionIndex = 0
+os.IsTimeout sessionIndex = 0
+attempt 2 sessionIndex = 0
+clienthello sessionIndex = 0
+os.IsTimeout sessionIndex = 0
+attempt 3 sessionIndex = 0
+clienthello sessionIndex = 0
+os.IsTimeout sessionIndex = 0
+attempt 4 sessionIndex = 0
+clienthello sessionIndex = 0
+os.IsTimeout sessionIndex = 0
+attempt 0 sessionIndex = 0
+clienthello sessionIndex = 0
+readingResponse sessionIndex = 0 err = read udp 192.168.1.14:60055->194.41.113.111:5555: i/o timeout
+attempt 1 sessionIndex = 0
+clienthello sessionIndex = 0
+os.IsTimeout sessionIndex = 0
+attempt 2 sessionIndex = 0
+clienthello sessionIndex = 0
+os.IsTimeout sessionIndex = 0
+attempt 3 sessionIndex = 0
+clienthello sessionIndex = 0
+os.IsTimeout sessionIndex = 0
+attempt 4 sessionIndex = 0
+clienthello sessionIndex = 0
+os.IsTimeout sessionIndex = 0
+attempt 0 sessionIndex = 1
+clienthello sessionIndex = 1
+readingResponse sessionIndex = 1 err = read udp 192.168.1.14:53424->194.41.113.111:5555: i/o timeout
+attempt 1 sessionIndex = 1
+clienthello sessionIndex = 1
+os.IsTimeout sessionIndex = 1
+attempt 2 sessionIndex = 1
+clienthello sessionIndex = 1
+os.IsTimeout sessionIndex = 1
+attempt 3 sessionIndex = 1
+clienthello sessionIndex = 1
+os.IsTimeout sessionIndex = 1
+attempt 4 sessionIndex = 1
+clienthello sessionIndex = 1
+os.IsTimeout sessionIndex = 1
+attempt 0 sessionIndex = 1
+clienthello sessionIndex = 1
+readingResponse sessionIndex = 1 err = read udp 192.168.1.14:51823->194.41.113.111:5555: i/o timeout
+attempt 1 sessionIndex = 1
+clienthello sessionIndex = 1
+os.IsTimeout sessionIndex = 1
+attempt 2 sessionIndex = 1
+clienthello sessionIndex = 1
+os.IsTimeout sessionIndex = 1
+attempt 3 sessionIndex = 1
+clienthello sessionIndex = 1
+os.IsTimeout sessionIndex = 1
+attempt 4 sessionIndex = 1
+clienthello sessionIndex = 1
+os.IsTimeout sessionIndex = 1
+attempt 0 sessionIndex = 0
+clienthello sessionIndex = 0
+readingResponse sessionIndex = 0 err = read udp 192.168.1.14:53484->194.41.113.111:5555: i/o timeout
+attempt 1 sessionIndex = 0
+clienthello sessionIndex = 0
+os.IsTimeout sessionIndex = 0
+attempt 2 sessionIndex = 0
+clienthello sessionIndex = 0
+os.IsTimeout sessionIndex = 0
+attempt 3 sessionIndex = 0
+clienthello sessionIndex = 0
+os.IsTimeout sessionIndex = 0
+attempt 4 sessionIndex = 0
+clienthello sessionIndex = 0
+os.IsTimeout sessionIndex = 0
+attempt 0 sessionIndex = 0
+clienthello sessionIndex = 0
+readingResponse sessionIndex = 0 err = read udp 192.168.1.14:53505->194.41.113.111:5555: i/o timeout
+attempt 1 sessionIndex = 0
+clienthello sessionIndex = 0
+os.IsTimeout sessionIndex = 0
+attempt 2 sessionIndex = 0
+clienthello sessionIndex = 0
+os.IsTimeout sessionIndex = 0
+attempt 3 sessionIndex = 0
+clienthello sessionIndex = 0
+os.IsTimeout sessionIndex = 0
+attempt 4 sessionIndex = 0
+clienthello sessionIndex = 0
+os.IsTimeout sessionIndex = 0
+attempt 0 sessionIndex = 1
+clienthello sessionIndex = 1
+readingResponse sessionIndex = 1 err = read udp 192.168.1.14:64207->194.41.113.111:5555: i/o timeout
+attempt 1 sessionIndex = 1
+clienthello sessionIndex = 1
+os.IsTimeout sessionIndex = 1
+attempt 2 sessionIndex = 1
+clienthello sessionIndex = 1
+os.IsTimeout sessionIndex = 1
+attempt 3 sessionIndex = 1
+clienthello sessionIndex = 1
+os.IsTimeout sessionIndex = 1
+attempt 4 sessionIndex = 1
+clienthello sessionIndex = 1
+os.IsTimeout sessionIndex = 1
+attempt 0 sessionIndex = 1
+clienthello sessionIndex = 1
+readingResponse sessionIndex = 1 err = read udp 192.168.1.14:64210->194.41.113.111:5555: i/o timeout
+attempt 1 sessionIndex = 1
+clienthello sessionIndex = 1
+os.IsTimeout sessionIndex = 1
+attempt 2 sessionIndex = 1
+clienthello sessionIndex = 1
+os.IsTimeout sessionIndex = 1
+attempt 3 sessionIndex = 1
+clienthello sessionIndex = 1
+os.IsTimeout sessionIndex = 1
+attempt 4 sessionIndex = 1
+clienthello sessionIndex = 1
+os.IsTimeout sessionIndex = 1
+16:27:47 ERR Failed to connect to server error="server is unavailable (timeout)" serverAddr=194.41.113.111:5555 state=listening
+16:27:47 FTL Can not connect to server host=194.41.113.111 port=5555 state=starting
+*/

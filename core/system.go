@@ -144,6 +144,8 @@ func (tunnel *Tunnel) Start(interfaceIP string) error {
 				ExecCmd("ip", "route", "add", tunnel.DestinationIP, "dev", tunnel.IfaceName)
 				// Route all
 				ExecCmd("ip", "route", "add", "default", "dev", tunnel.IfaceName)
+				// disable IPv6
+				ExecCmd("sysctl", "-w", fmt.Sprintf("net.ipv6.conf.%s.disable_ipv6=1", tunnel.IfaceName))
 
 				log.Info().
 					Str("state", "configTunnel").
@@ -243,6 +245,13 @@ func (tunnel *Tunnel) Start(interfaceIP string) error {
 			fmt.Sprintf("mtu=%d", MaxPayload),
 			"store=persistent",
 		)
+		// disable IPv6
+		ExecCmd("netsh", "interface", "ipv6", "set", "interface", fmt.Sprintf(`"%s"`, tunnel.IfaceName), "disabled")
+		// ignore IPv6
+		ExecCmd("powershell", "-Command", "Disable-NetAdapterBinding", "-Name", fmt.Sprintf(`"%s"`, tunnel.IfaceName), "-ComponentID", "ms_tcpip6")
+		// disable "Microsoft client"
+		ExecCmd("powershell", "-Command", "Disable-NetAdapterBinding", "-Name", fmt.Sprintf(`"%s"`, tunnel.IfaceName), "-ComponentID", "ms_msclient")
+		ExecCmd("powershell", "-Command", "Disable-NetAdapterBinding", "-Name", fmt.Sprintf(`"%s"`, tunnel.IfaceName), "-ComponentID", "ms_server")
 
 		if tunnel.DestinationIP != "" { // client
 			if len(tunnel.Whitelist) == 0 {
@@ -291,6 +300,13 @@ func (tunnel *Tunnel) Start(interfaceIP string) error {
 						Str("state", "configTunnel").
 						Str("addr", addr).
 						Msg("Routed IP into tunnel")
+				} else if strings.Contains(addr, ".") {
+					dots := strings.Split(addr, ".")
+					if dots[len(dots)-1] == "exe" {
+						// application
+					} else {
+						// domain
+					}
 				} else {
 					log.Error().
 						Str("state", "configTunnel").
@@ -478,7 +494,6 @@ func InitLogger(levelStr string, filename string) {
 				Str("state", "logSetup").
 				Msg("Cannot open log file")
 		}
-		defer file.Close()
 
 		out = io.MultiWriter(os.Stdout, file)
 	} else {

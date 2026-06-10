@@ -8,12 +8,13 @@ import (
 	"sync"
 	"time"
 
-	"github.com/patrickmn/go-cache"
 	"github.com/rs/zerolog/log"
 )
 
-const MaxPayload = 1400
+const MaxPayload = 1360
 const ProtocolVersion byte = 1
+const HeaderIPv4Length = 3 + 4 + 4 + 4 + 2
+const HeaderIPv6Length = 3 + 16 + 16 + 4 + 2
 
 // Packet [ProtocolVersion:1][PacketType:1][AddrType:1][SrcIP:4/16][DstIP:4/16][Rst:4][Length:2][Data:N]
 type Packet struct {
@@ -137,15 +138,63 @@ func UnmarshalPacket(data []byte) (*Packet, error) {
 	return p, nil
 }
 
+type ProcessBufferResult struct {
+	CompletePacket []byte
+	RemainingBuf   []byte
+	Err            error
+}
+
+func ExtractPacket(buf []byte) (bool, *ProcessBufferResult) {
+	result := &ProcessBufferResult{}
+
+	if len(buf) < 3 {
+		return false, nil
+	}
+
+	addrType := buf[2]
+
+	var headerLen int
+	switch addrType {
+	case 4:
+		headerLen = HeaderIPv4Length
+	case 6:
+		headerLen = HeaderIPv6Length
+	default:
+		result.Err = fmt.Errorf("invalid AddrType %d in stream", addrType)
+		return true, result
+	}
+
+	if len(buf) < headerLen {
+		return false, nil
+	}
+
+	payloadLen := binary.BigEndian.Uint16(buf[headerLen-2 : headerLen])
+	totalLen := headerLen + int(payloadLen)
+
+	if totalLen > 10*1024*1024 {
+		result.Err = fmt.Errorf("packet too large: %d bytes", totalLen)
+		return true, result
+	}
+
+	if len(buf) < totalLen {
+		return false, nil // Ждем еще данных
+	}
+
+	result.CompletePacket = buf[:totalLen]
+	result.RemainingBuf = buf[totalLen:]
+
+	return true, result
+}
+
 func MakeDefaultPacket(srcAddr net.IP, dstAddr net.IP, data []byte) (*Packet, error) {
 	srcIPv, srcIP := validateIP(srcAddr)
 	dstIPv, dstIP := validateIP(dstAddr)
 
 	if srcIP == nil {
-		return nil, fmt.Errorf("srcIP is not valid IPv%d: %v", srcIPv, srcIP)
+		return nil, fmt.Errorf("srcIP is not valid 'IPv%d': %v", srcIPv, srcIP)
 	}
 	if dstIP == nil {
-		return nil, fmt.Errorf("dsrIP is not valid IPv%d: %v", dstIPv, srcIP)
+		return nil, fmt.Errorf("dstIP is not valid 'IPv%d': %v", dstIPv, srcIP)
 	}
 	if srcIPv != dstIPv {
 		return nil, fmt.Errorf("IP version mismatch: src=%d, dst=%d", srcIPv, dstIPv)
@@ -223,7 +272,7 @@ func (client *Client) SendPacket(packet *Packet) {
 			Str("state", "serverCommand").
 			Int("len", len(bytes)).
 			Int("AddrType", int(packet.AddrType)).
-			Msg("(UDP<=Interface) Failed to marshal packet")
+			Msg("(Network<=Interface) Failed to marshal packet")
 	}
 
 	if _, err = client.Session.Write(bytes); err != nil {
@@ -232,17 +281,17 @@ func (client *Client) SendPacket(packet *Packet) {
 			Str("state", "serverCommand").
 			Int("len", len(bytes)).
 			Int("AddrType", int(packet.AddrType)).
-			Msg("(UDP<=Interface) Failed to send packet")
+			Msg("(Network<=Interface) Failed to send packet")
 	} else {
 		log.Debug().
 			Str("state", "serverCommand").
 			Int("len", len(bytes)).
 			Int("AddrType", int(packet.AddrType)).
-			Msg("(UDP<=Interface) Sent a packet")
+			Msg("(Network<=Interface) Sent a packet")
 	}
 }
 
-func (server *Server) SendPacket(packet *Packet, peerAddr *net.UDPAddr, layer NetLayer) {
+func (server *Server) SendPacket(packet *Packet, peer *Peer) {
 	bytes, err := MarshalPacket(packet)
 	if err != nil {
 		log.Debug().
@@ -250,36 +299,41 @@ func (server *Server) SendPacket(packet *Packet, peerAddr *net.UDPAddr, layer Ne
 			Str("state", "clientCommand").
 			Int("len", len(bytes)).
 			Int("AddrType", int(packet.AddrType)).
-			Msg("(UDP<=Interface) Failed to marshal packet")
+			Msg("(Network<=Interface) Failed to marshal packet")
 	}
 
-	wrapped, err := layer.Wrap(bytes)
+	wrapped, err := peer.NLChain.Wrap(bytes)
 	if err != nil {
 		log.Debug().
 			Err(err).
 			Str("state", "clientCommand").
 			Int("len", len(bytes)).
 			Int("AddrType", int(packet.AddrType)).
-			Msg("(UDP<=Interface) Failed to wrap packet")
+			Msg("(Network<=Interface) Failed to wrap packet")
 	}
 
-	if _, err = server.Conn.WriteToUDP(wrapped, peerAddr); err != nil {
+	writeToPeer := func() (int, error) { return server.Conn.WriteToUDP(wrapped, peer.Addr.UdpParent) }
+	if peer.Addr.Type == "tcp" {
+		writeToPeer = func() (int, error) { return peer.TcpWrite(wrapped) }
+	}
+
+	if _, err = writeToPeer(); err != nil {
 		log.Debug().
 			Err(err).
 			Str("state", "clientCommand").
 			Int("len", len(bytes)).
 			Int("AddrType", int(packet.AddrType)).
-			Msg("(UDP<=Interface) Failed to send packet")
+			Msg("(Network<=Interface) Failed to send packet")
 	} else {
 		log.Debug().
 			Str("state", "clientCommand").
 			Int("len", len(bytes)).
 			Int("AddrType", int(packet.AddrType)).
-			Msg("(UDP<=Interface) Sent a packet")
+			Msg("(Network<=Interface) Sent a packet")
 	}
 }
 
-func (server *Server) PacketAPI(conn net.UDPConn, peer *Peer, packet *Packet, clientAddr *net.UDPAddr) bool {
+func (server *Server) PacketAPI(conn net.Conn, peer *Peer, packet *Packet) bool {
 	if packet.Type == 1 {
 		strClientAddr := peer.Addr.String()
 
@@ -290,14 +344,16 @@ func (server *Server) PacketAPI(conn net.UDPConn, peer *Peer, packet *Packet, cl
 				log.Info().
 					Str("state", "API").
 					Str("peer", strClientAddr).
+					Str("connType", peer.Addr.Type).
 					Str("localIP", packet.SrcIP.String()).
-					Msg("(UDP=>Interface) Peer disconnected")
+					Msg("(Network=>Interface) Peer disconnected")
 			} else {
 				log.Info().
 					Str("state", "API").
 					Str("peer", strClientAddr).
+					Str("connType", peer.Addr.Type).
 					Str("localIP", packet.SrcIP.String()).
-					Msg("(UDP=>Interface) Peer not found")
+					Msg("(Network=>Interface) Peer not found")
 			}
 
 		case [4]byte{0, 0, 0, 1}: // ping
@@ -307,29 +363,23 @@ func (server *Server) PacketAPI(conn net.UDPConn, peer *Peer, packet *Packet, cl
 					Err(err).
 					Str("state", "API").
 					Str("peer", strClientAddr).
+					Str("connType", peer.Addr.Type).
 					Str("localIP", packet.SrcIP.String()).
-					Msg("(UDP=>Interface) Failed to make a PING packet")
+					Msg("(Network=>Interface) Failed to make a PING packet")
 				return true
 			}
-			server.SendPacket(ping, peer.Addr, peer.NLChain)
+			server.SendPacket(ping, peer)
 		}
-
-		server.Cache.Set(
-			clientAddr.String(),
-			peer,
-			cache.DefaultExpiration,
-		)
-
 		return true
 	}
 	return false
 }
 
-func (client *Client) PacketAPI(conn net.UDPConn, serverAddr net.UDPAddr, packet *Packet) bool {
+func (client *Client) PacketAPI(conn net.Conn, serverAddr *Address, packet *Packet) bool {
 	if packet.Type == 1 {
 		switch packet.Rsv {
 		case [4]byte{0, 0, 0, 0}: // disconnect
-			client.Stop("(UDP=>Interface) Server disconnected you")
+			client.Stop("(Network=>Interface) Server disconnected you")
 		case [4]byte{0, 0, 0, 1}: // pong
 		}
 		return true
@@ -403,4 +453,77 @@ func validateIP(ip net.IP) (byte, net.IP) {
 		return 6, ip16
 	}
 	return 0, nil
+}
+
+type Address struct {
+	Type string // "udp" or "tcp"
+	IP   net.IP
+	Port int
+	Zone string
+
+	UdpParent *net.UDPAddr
+	TcpParent *net.TCPAddr
+
+	addrString string
+}
+
+func NewAddress(connType, ip string, port int) (*Address, error) {
+	addrFormatted := fmt.Sprintf("%s:%d", ip, port)
+	parentTcpAddr, err := net.ResolveTCPAddr("tcp", addrFormatted)
+	if err != nil {
+		return nil, err
+	}
+	parentUdpAddr, err := net.ResolveUDPAddr("udp", addrFormatted)
+	if err != nil {
+		return nil, err
+	}
+	if connType == "udp" {
+		return &Address{
+			Type:       connType,
+			IP:         parentUdpAddr.IP,
+			Port:       parentUdpAddr.Port,
+			Zone:       parentUdpAddr.Zone,
+			UdpParent:  parentUdpAddr,
+			TcpParent:  parentTcpAddr,
+			addrString: addrFormatted,
+		}, nil
+	} else if connType == "tcp" {
+		return &Address{
+			Type:       connType,
+			IP:         parentTcpAddr.IP,
+			Port:       parentTcpAddr.Port,
+			Zone:       parentTcpAddr.Zone,
+			UdpParent:  parentUdpAddr,
+			TcpParent:  parentTcpAddr,
+			addrString: addrFormatted,
+		}, nil
+	}
+	return nil, fmt.Errorf("unsupported connection type %s", connType)
+}
+
+func NewAddressFromUDP(udpAddr *net.UDPAddr) *Address {
+	return &Address{
+		Type:       "udp",
+		IP:         udpAddr.IP,
+		Port:       udpAddr.Port,
+		Zone:       udpAddr.Zone,
+		UdpParent:  udpAddr,
+		TcpParent:  nil,
+		addrString: udpAddr.String(),
+	}
+}
+func NewAddressFromTCP(tcpAddr *net.TCPAddr) *Address {
+	return &Address{
+		Type:       "tcp",
+		IP:         tcpAddr.IP,
+		Port:       tcpAddr.Port,
+		Zone:       tcpAddr.Zone,
+		UdpParent:  nil,
+		TcpParent:  tcpAddr,
+		addrString: tcpAddr.String(),
+	}
+}
+
+func (a *Address) String() string {
+	return a.addrString
 }

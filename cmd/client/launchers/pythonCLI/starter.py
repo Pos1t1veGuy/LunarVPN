@@ -15,7 +15,7 @@ author = 'Pos1t1veGuy'
 repo = 'LunarVPN'
 client = 'client.exe'
 updater = 'updater.exe'
-config_file = 'profile.lunar'
+config_file = ''#'profile.lunar'
 RELEASE = 'commercial'
 REPO_URL = f'https://api.github.com/repos/{author}/{repo}'
 BASE_DIR = Path(sys.executable if getattr(sys, 'frozen', False) else __file__).parent
@@ -173,7 +173,10 @@ if __name__ == '__main__':
             )
             input('[+] Press ENTER to exit. ')
         else:
-            raise Exception(f'profile config not found, looking for a "{config_file}" file. Press ENTER to close the program...')
+            print('[+] Running without profile config...')
+            os.system(client)
+            input('[+] Press ENTER to exit. ')
+            #raise Exception(f'profile config not found, looking for a "{config_file}" file. Press ENTER to close the program...')
 
     except KeyboardInterrupt:
         pass

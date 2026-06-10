@@ -6,7 +6,6 @@ import (
 	"os"
 	"os/signal"
 	"syscall"
-	"time"
 
 	"github.com/google/gopacket"
 	"github.com/google/gopacket/layers"
@@ -15,27 +14,32 @@ import (
 
 type Client struct {
 	VirtualIP   *net.IP
-	ServerAddr  *net.UDPAddr
+	ServerAddr  *Address
 	WhiteList   []string
 	BlackList   []string
 	LayerChains []NetLayer
 	Stopping    chan struct{}
 	Session     Session
 
+	tcpBuffer []byte
 	Endpoint
 }
 
 func (client *Client) Connect(addr string, port int, login, password string, layersIndexes []uint8, defaultLayer uint8) bool {
 	var err error
-	serverAddrFormatted := fmt.Sprintf("%s:%d", addr, port)
-
-	client.ServerAddr, err = net.ResolveUDPAddr("udp", serverAddrFormatted)
+	if client.Session.Type() != "tcp" && client.Session.Type() != "udp" {
+		log.Fatal().
+			Str("state", "connecting").
+			Str("connType", client.Session.Type()).
+			Msg("Invalid connection type (only \"tcp\" or \"udp\")")
+	}
+	client.ServerAddr, err = NewAddress(client.Session.Type(), addr, port)
 	if err != nil {
 		log.Fatal().
 			Err(err).
 			Str("state", "connecting").
-			Str("serverAddr", serverAddrFormatted).
-			Msg("Failed to resolve server address")
+			Str("serverAddr", client.ServerAddr.String()).
+			Msg("Failed to resolve server tcp address")
 	}
 
 	client.VirtualIP, err = client.Session.Open(client, defaultLayer, layersIndexes, login, password)
@@ -50,6 +54,7 @@ func (client *Client) Connect(addr string, port int, login, password string, lay
 
 	log.Info().
 		Str("state", "connecting").
+		Str("connType", client.Session.Type()).
 		Str("IP", client.VirtualIP.String()).
 		Msg("Client connected to server")
 
@@ -113,7 +118,7 @@ func (client *Client) ListenUnsafe() {
 			Msg("Failed to create a local server")
 	}
 
-	go funcSafe("UDP=>Interface", func() {
+	go funcSafe("Network=>Interface", func() {
 		buf := make([]byte, 1500)
 		for {
 			select {
@@ -124,59 +129,54 @@ func (client *Client) ListenUnsafe() {
 
 			n, err := client.Session.Read(buf)
 			if err != nil || n == 0 {
-				time.Sleep(1 * time.Millisecond)
 				continue
 			}
 			packet, err := UnmarshalPacket(buf[:n])
 			if err != nil {
 				log.Debug().
 					Err(err).
-					Str("state", "U2I").
+					Str("state", "N2I").
 					Int("len", n).
 					Int("addrType", int(packet.AddrType)).
-					Msg("(UDP=>Interface) Cannot unmarshal packet")
-				time.Sleep(1 * time.Millisecond)
+					Msg("(Network=>Interface) Cannot unmarshal packet")
 				continue
 			}
 			switch packet.AddrType {
 			case 4:
-				if !client.PacketAPI(*client.Conn, *client.ServerAddr, packet) {
+				if !client.PacketAPI(client.Conn, client.ServerAddr, packet) {
 					if _, err = client.Interface.Write(packet.Data); err != nil {
 						log.Debug().
 							Err(err).
-							Str("state", "U2I").
+							Str("state", "N2I").
 							Int("len", n).
 							Int("addrType", int(packet.AddrType)).
-							Msg("(UDP=>Interface) Cannot send packet")
+							Msg("(Network=>Interface) Cannot send packet")
 					} else {
 						log.Debug().
-							Str("state", "U2I").
+							Str("state", "N2I").
 							Int("len", n).
 							Int("addrType", int(packet.AddrType)).
-							Msg("(UDP=>Interface) Sent a packet")
+							Msg("(Network=>Interface) Sent a packet")
 					}
 				} else {
 					log.Debug().
 						Int("len", n).
-						Str("state", "U2I").
+						Str("state", "N2I").
 						Int("addrType", int(packet.AddrType)).
 						Str("srcIP", packet.SrcIP.String()).
 						Str("dstIP", packet.DstIP.String()).
-						Msg("(UDP=>Interface) Got API packet")
+						Msg("(Network=>Interface) Got API packet")
 				}
 			case 6:
-				time.Sleep(1 * time.Millisecond)
 				continue
 
 			default:
-				time.Sleep(1 * time.Millisecond)
 				continue
 			}
-			time.Sleep(1 * time.Millisecond)
 		}
 	}, true)
 
-	go funcSafe("UDP<=Interface", func() {
+	go funcSafe("Network<=Interface", func() {
 		buffer := make([]byte, 1500)
 		for {
 			select {
@@ -187,7 +187,6 @@ func (client *Client) ListenUnsafe() {
 
 			n, err := client.Interface.Read(buffer)
 			if err != nil || n == 0 {
-				time.Sleep(1 * time.Millisecond)
 				continue
 			}
 
@@ -202,38 +201,36 @@ func (client *Client) ListenUnsafe() {
 					if err != nil {
 						log.Error().
 							Err(err).
-							Str("state", "I2U").
+							Str("state", "I2N").
 							Int("len", n).
 							Str("srcIP", ip4.SrcIP.String()).
 							Str("dstIP", ip4.DstIP.String()).
-							Msg("(UDP<=Interface) Failed to make a packet")
-						time.Sleep(1 * time.Millisecond)
+							Msg("(Network<=Interface) Failed to make a packet")
 						continue
 					}
 					bytes, err := MarshalPacket(packet)
 					if err != nil {
 						log.Debug().
 							Err(err).
-							Str("state", "I2U").
+							Str("state", "I2N").
 							Int("len", n).
 							Int("addrType", int(packet.AddrType)).
-							Msg("(UDP<=Interface) Failed to marshal packet")
-						time.Sleep(1 * time.Millisecond)
+							Msg("(Network<=Interface) Failed to marshal packet")
 						continue
 					}
 					if _, err = client.Session.Write(bytes); err != nil {
 						log.Debug().
 							Err(err).
-							Str("state", "I2U").
+							Str("state", "I2N").
 							Int("len", n).
 							Int("addrType", int(packet.AddrType)).
-							Msg("(UDP<=Interface) Failed to send packet")
+							Msg("(Network<=Interface) Failed to send packet")
 					} else {
 						log.Debug().
-							Str("state", "I2U").
+							Str("state", "I2N").
 							Int("len", n).
 							Int("addrType", int(packet.AddrType)).
-							Msg("(UDP<=Interface) Sent a packet")
+							Msg("(Network<=Interface) Sent a packet")
 					}
 				}
 
@@ -244,15 +241,12 @@ func (client *Client) ListenUnsafe() {
 				//	Int("len", n).
 				//	Str("state", "I2U").
 				//	Int("addrType", int(version)).
-				//	Msg("(UDP<=Interface) IPv6 not supported")
-				time.Sleep(1 * time.Millisecond)
+				//	Msg("(Network<=Interface) IPv6 not supported")
 				continue
 
 			default:
-				time.Sleep(1 * time.Millisecond)
 				continue
 			}
-			time.Sleep(1 * time.Millisecond)
 		}
 	}, true)
 
