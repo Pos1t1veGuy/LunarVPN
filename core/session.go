@@ -426,7 +426,7 @@ func (mgr *UdpSessionPool) ReaderLoop(session Session) {
 		}
 		if !mgr.PacketAPI(session, packet) {
 			select {
-			case mgr.readBuffer <- buf[:n]:
+			case mgr.readBuffer <- bytes:
 			case <-mgr.Stopping:
 				return
 			}

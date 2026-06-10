@@ -16,7 +16,7 @@ import (
 	"github.com/rs/zerolog/log"
 )
 
-const CurrentVersion = "1.0.2"
+const CurrentVersion = "1.0.3"
 
 func main() {
 	validLogLevels := map[string]struct{}{
