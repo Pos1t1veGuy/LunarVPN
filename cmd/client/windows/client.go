@@ -28,8 +28,8 @@ func main() {
 	validConnTypes := map[string]core.Session{
 		"udp":     core.NewUdpSession(5 * time.Second),
 		"udpPool": core.NewUdpSessionPool(8, 5*time.Second, 4*time.Second),
-		"tcp":     core.NewTcpSession(5 * time.Second),
-		"tcpPool": core.NewTcpSessionPool(8, 5*time.Second, 4*time.Second),
+		//"tcp":     core.NewTcpSession(5 * time.Second),
+		//"tcpPool": core.NewTcpSessionPool(8, 5*time.Second, 4*time.Second),
 	}
 	lrs := []core.NetLayer{
 		core.NewDebugLayer(false, false),
@@ -44,7 +44,7 @@ func main() {
 	login := flag.String("login", "admin", "user login")
 	password := flag.String("password", "admin", "user password")
 	logLevel := flag.String("logLevel", "info", "application log level (debug, info, warn, error)")
-	connType := flag.String("connType", "udpPool", "type of connection to server (udp, udpPool, tcp, tcpPool)")
+	connType := flag.String("connType", "udpPool", "type of connection to server (udp, udpPool)")
 	defaultLayer := flag.Int(
 		"defaultLayer",
 		1,

@@ -66,11 +66,7 @@ func MarshalPacket(p *Packet) ([]byte, error) {
 	buf = append(buf, p.Rsv[:]...)
 
 	if int(p.Length) != len(p.Data) {
-		return nil, fmt.Errorf(
-			"packet length mismatch: header=%d actual=%d",
-			p.Length,
-			len(p.Data),
-		)
+		return nil, fmt.Errorf("packet length mismatch: header=%d actual=%d", p.Length, len(p.Data))
 	}
 
 	lengthBytes := make([]byte, 2)
@@ -300,6 +296,7 @@ func (server *Server) SendPacket(packet *Packet, peer *Peer) {
 			Int("len", len(bytes)).
 			Int("AddrType", int(packet.AddrType)).
 			Msg("(Network<=Interface) Failed to marshal packet")
+		return
 	}
 
 	wrapped, err := peer.NLChain.Wrap(bytes)
@@ -310,6 +307,7 @@ func (server *Server) SendPacket(packet *Packet, peer *Peer) {
 			Int("len", len(bytes)).
 			Int("AddrType", int(packet.AddrType)).
 			Msg("(Network<=Interface) Failed to wrap packet")
+		return
 	}
 
 	writeToPeer := func() (int, error) { return server.Conn.WriteToUDP(wrapped, peer.Addr.UdpParent) }

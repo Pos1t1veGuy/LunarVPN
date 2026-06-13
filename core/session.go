@@ -134,14 +134,7 @@ func (session *UdpSession) Read(buf []byte) (n int, err error) {
 }
 func (session *UdpSession) Write(b []byte) (n int, err error) {
 	if session.Opened {
-		wrapped, err := func() (data []byte, panicErr error) {
-			defer func() {
-				if r := recover(); r != nil {
-					panicErr = fmt.Errorf("panic in Wrap: NLayer type=%T value=%#v, error: %v", session.NLayer, session.NLayer, r)
-				}
-			}()
-			return session.NLayer.Wrap(b)
-		}()
+		wrapped, err := session.NLayer.Wrap(b)
 		if err != nil {
 			return n, err
 		}
@@ -218,22 +211,24 @@ func (session *UdpSession) SendPacket(packet *Packet) {
 }
 
 type UdpSessionPool struct {
-	Index        uint
-	Conn         net.Conn
-	PingDuration time.Duration
-	Sessions     []*UdpSession
-	MaxSessions  uint
-	VirtualIP    net.IP
+	Index          uint
+	Conn           net.Conn
+	PingDuration   time.Duration
+	FilterDuration time.Duration
+	Sessions       []*UdpSession
+	MaxSessions    uint
+	VirtualIP      net.IP
 
 	ReopenMgr     func() (ip *net.IP, err error)
 	OpenSession   func(session Session, index uint) (ip *net.IP, err error)
 	ReopenSession func(session Session) (ip *net.IP, err error)
 
-	Ping       Ping
-	Opened     bool
-	mu         sync.RWMutex
-	readBuffer chan []byte
-	Stopping   chan struct{}
+	Ping             Ping
+	Opened           bool
+	mu               sync.RWMutex
+	readBuffer       chan []byte
+	Stopping         chan struct{}
+	FilteredSessions []*UdpSession
 }
 
 func NewUdpSessionPool(maxSessions uint, localPingDuration time.Duration, globalPingDuration time.Duration) *UdpSessionPool {
@@ -243,11 +238,12 @@ func NewUdpSessionPool(maxSessions uint, localPingDuration time.Duration, global
 		sessions = append(sessions, NewUdpSession(localPingDuration))
 	}
 	mgr := &UdpSessionPool{
-		PingDuration: globalPingDuration,
-		Sessions:     sessions,
-		MaxSessions:  maxSessions,
-		readBuffer:   make(chan []byte, 4096),
-		Stopping:     make(chan struct{}),
+		PingDuration:   globalPingDuration,
+		FilterDuration: 1 * time.Second,
+		Sessions:       sessions,
+		MaxSessions:    maxSessions,
+		readBuffer:     make(chan []byte, 4096),
+		Stopping:       make(chan struct{}),
 	}
 	sess := make([]Session, len(sessions))
 	for i, s := range sessions {
@@ -328,6 +324,7 @@ func (mgr *UdpSessionPool) SingleOpen(client *Client, defaultLayer uint8, layers
 		go mgr.ReaderLoop(session)
 	}
 	go mgr.PingLoop(mgr.PingDuration)
+	go mgr.FilterLoop(mgr.FilterDuration)
 
 	mgr.Opened = true
 
@@ -352,7 +349,7 @@ func (mgr *UdpSessionPool) Close() error {
 }
 
 func (mgr *UdpSessionPool) Write(b []byte) (n int, err error) {
-	for _, session := range mgr.FilterSessions() {
+	for _, session := range mgr.FilteredSessions {
 		if session == nil {
 			return 0, errors.New("no session found")
 		}
@@ -499,57 +496,16 @@ func (mgr *UdpSessionPool) PingLoop(duration time.Duration) {
 	}
 }
 
-type TcpSession struct {
-	UdpSession
-	Conn      *net.TCPConn
-	tcpBuffer []byte
-	tcpMu     sync.RWMutex
-}
-
-func NewTcpSession(pingDuration time.Duration) *TcpSession {
-	return &TcpSession{
-		UdpSession: *NewUdpSession(pingDuration),
+func (mgr *UdpSessionPool) FilterLoop(duration time.Duration) {
+	for {
+		time.Sleep(duration)
+		select {
+		case <-mgr.Stopping:
+			return
+		default:
+		}
+		mgr.FilteredSessions = mgr.FilterSessions()
 	}
-}
-
-func (session *TcpSession) Type() string {
-	return "tcp"
-}
-
-func (session *TcpSession) Dial(address *Address) (err error) {
-	session.Conn, err = net.DialTCP("tcp", nil, address.TcpParent)
-	return err
-}
-
-type TcpSessionPool struct {
-	UdpSessionPool
-	Sessions []*TcpSession
-}
-
-func NewTcpSessionPool(maxSessions uint, localPingDuration time.Duration, globalPingDuration time.Duration) *TcpSessionPool {
-	sessions := make([]*TcpSession, 0, maxSessions)
-
-	for i := uint(0); i < maxSessions; i++ {
-		sessions = append(sessions, NewTcpSession(localPingDuration))
-	}
-	mgr := &TcpSessionPool{
-		Sessions: sessions,
-		UdpSessionPool: UdpSessionPool{
-			PingDuration: globalPingDuration,
-			MaxSessions:  maxSessions,
-			readBuffer:   make(chan []byte, 4096),
-			Stopping:     make(chan struct{}),
-		},
-	}
-	sess := make([]Session, len(sessions))
-	for i, s := range sessions {
-		sess[i] = s
-	}
-	mgr.Ping = NewPingGroup(sess)
-	return mgr
-}
-func (session *TcpSessionPool) Type() string {
-	return "tcp"
 }
 
 type PingGroup struct {

@@ -3,10 +3,12 @@
 package core
 
 import (
+	"errors"
 	"net"
 	"time"
 
 	"github.com/rs/zerolog/log"
+	"golang.org/x/sys/windows"
 	"golang.zx2c4.com/wintun"
 )
 
@@ -46,14 +48,21 @@ func NewWintunAdapter(name string, sessionBufSize uint32) (*WintunAdapter, error
 }
 
 func (adapter *WintunAdapter) Read(p []byte) (int, error) {
-	packet, err := adapter.Session.ReceivePacket()
-	if err != nil {
+	for {
+		packet, err := adapter.Session.ReceivePacket()
+		if err == nil {
+			defer adapter.Session.ReleaseReceivePacket(packet)
+			return copy(p, packet), nil
+		}
+
+		if errors.Is(err, windows.ERROR_NO_MORE_ITEMS) {
+			event := adapter.Session.ReadWaitEvent()
+			_, _ = windows.WaitForSingleObject(event, windows.INFINITE)
+			continue
+		}
+
 		return 0, err
 	}
-	defer adapter.Session.ReleaseReceivePacket(packet)
-
-	n := copy(p, packet)
-	return n, nil
 }
 
 func (adapter *WintunAdapter) Write(b []byte) (int, error) {

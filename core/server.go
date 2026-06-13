@@ -12,8 +12,6 @@ import (
 	"syscall"
 	"time"
 
-	"github.com/google/gopacket"
-	"github.com/google/gopacket/layers"
 	"github.com/patrickmn/go-cache"
 	"github.com/rs/zerolog/log"
 )
@@ -208,7 +206,13 @@ func (server *Server) MakeInterfacePipe() {
 		defer server.wg.Done()
 		buffer := make([]byte, 1500)
 		pipe := fmt.Sprintf("(%s) ", pipeName)
+
 		var key string
+		srcIP := make(net.IP, 4)
+		dstIP := make(net.IP, 4)
+		var version byte
+		var err error
+		var n int
 
 		for {
 			select {
@@ -217,51 +221,49 @@ func (server *Server) MakeInterfacePipe() {
 			default:
 			}
 
-			n, err := server.Interface.Read(buffer)
+			n, err = server.Interface.Read(buffer)
 			if err != nil || n == 0 {
 				continue
 			}
 
-			version := buffer[0] >> 4
+			version = buffer[0] >> 4
 			switch version {
 			case 4:
-				gop := gopacket.NewPacket(buffer[:n], layers.LayerTypeIPv4, gopacket.NoCopy)
-				ip4 := gop.Layer(layers.LayerTypeIPv4).(*layers.IPv4)
+				if n < 20 {
+					continue
+				}
 
-				packet, err := MakeDefaultPacket(ip4.SrcIP, ip4.DstIP, buffer[:n])
+				copy(srcIP, buffer[12:16]) // Src
+				copy(dstIP, buffer[16:20]) // Dst
+
+				key = fmt.Sprintf("%v=>%v", dstIP, srcIP)
+				v, ok := server.Cache.Get(key)
+				if !ok {
+					log.Debug().
+						Str("state", "I2N").
+						Int("len", n).
+						Int("addrType", int(version)).
+						Str("srcIP", srcIP.String()).
+						Str("dstIP", dstIP.String()).
+						Msg(pipe + "Can not find peer receiver")
+					continue
+				}
+
+				packet, err := MakeDefaultPacket(srcIP, dstIP, buffer[:n])
 				if err != nil {
 					log.Error().
 						Err(err).
 						Str("state", "I2N").
 						Int("len", n).
-						Str("srcIP", ip4.SrcIP.String()).
-						Str("dstIP", ip4.DstIP.String()).
+						Str("srcIP", srcIP.String()).
+						Str("dstIP", dstIP.String()).
 						Msg(pipe + "Failed to make a packet")
 					continue
 				}
-				key = fmt.Sprintf("%v=>%v", packet.DstIP, packet.SrcIP)
-				v, ok := server.Cache.Get(key)
-				if ok {
-					server.SendPacket(packet, v.(*Peer))
-				} else {
-					log.Debug().
-						Str("state", "I2N").
-						Int("len", n).
-						Int("addrType", int(packet.AddrType)).
-						Str("srcIP", ip4.SrcIP.String()).
-						Str("dstIP", ip4.DstIP.String()).
-						Msg(pipe + "Can not find peer receiver")
-				}
+
+				server.SendPacket(packet, v.(*Peer))
 
 			case 6:
-				//gop := gopacket.NewPacket(buffer[:n], layers.LayerTypeIPv6, gopacket.NoCopy)
-				//ip6 := gop.Layer(layers.LayerTypeIPv6).(*layers.IPv6)
-				//log.Warn().
-				//	Int("len", n).
-				//	Str("state", "I2N").
-				//	Int("addrType", int(version)).
-				//	Str("key", key).
-				//	Msg(pipe+"IPv6 not supported")
 				continue
 
 			default:
@@ -277,8 +279,17 @@ func (server *Server) MakeUdpPipe(authLayer uint8) {
 	go funcSafe(pipeType+"=>Interface", func() {
 		server.wg.Add(1)
 		defer server.wg.Done()
+
 		buf := make([]byte, 1500)
 		pipe := fmt.Sprintf("(%s=>Interface) ", pipeType)
+		var packet *Packet
+		var unwrapped []byte
+		var peerAddr *net.UDPAddr
+		var peerAddrStr string
+		var err error
+		var n int
+		var peer *Peer
+		var found bool
 
 		for {
 			select {
@@ -287,7 +298,7 @@ func (server *Server) MakeUdpPipe(authLayer uint8) {
 			default:
 			}
 
-			n, peerAddr, err := server.Conn.ReadFromUDP(buf)
+			n, peerAddr, err = server.Conn.ReadFromUDP(buf)
 			if err != nil || n == 0 {
 				continue
 			}
@@ -297,9 +308,10 @@ func (server *Server) MakeUdpPipe(authLayer uint8) {
 			} else {
 				version = 6
 			}
+			peerAddrStr = peerAddr.String()
 
 			// auth
-			peer, found := server.Peers[peerAddr.String()]
+			peer, found = server.Peers[peerAddrStr]
 			if !found {
 				writeFunc := func(payload []byte) (int, error) {
 					return server.Conn.WriteToUDP(payload, peerAddr)
@@ -311,23 +323,23 @@ func (server *Server) MakeUdpPipe(authLayer uint8) {
 						Int("len", n).
 						Str("state", "U2I").
 						Int("addrType", version).
-						Str("peerAddr", peerAddr.String()).
+						Str("peerAddr", peerAddrStr).
 						Msg(pipe + "Handshake failed")
 					continue
 				}
-				server.Peers[peerAddr.String()] = peer
+				server.Peers[peerAddrStr] = peer
 
 				log.Info().
 					Int("len", n).
 					Str("state", "U2I").
 					Int("addrType", version).
-					Str("peerRealAddr", peerAddr.String()).
+					Str("peerRealAddr", peerAddrStr).
 					Str("peerVirtualIP", peer.VirtualIP.String()).
 					Msg(pipe + "Handshake success")
 				continue
 			}
 
-			unwrapped, err := peer.NLChain.Wrap(buf[:n])
+			unwrapped, err = peer.NLChain.Wrap(buf[:n])
 			if err != nil {
 				log.Debug().
 					Err(err).
@@ -335,8 +347,9 @@ func (server *Server) MakeUdpPipe(authLayer uint8) {
 					Str("state", "U2I").
 					Int("addrType", version).
 					Msg(pipe + "Failed to unwrap packet")
+				continue
 			}
-			packet, err := UnmarshalPacket(unwrapped)
+			packet, err = UnmarshalPacket(unwrapped)
 			if err != nil || packet.AddrType != 4 {
 				log.Debug().
 					Err(err).
@@ -346,28 +359,7 @@ func (server *Server) MakeUdpPipe(authLayer uint8) {
 					Msg(pipe + "Failed to marshal packet")
 				continue
 			}
-			if !server.PacketAPI(server.Conn, peer, packet) {
-				if _, err := server.Interface.Write(packet.Data); err != nil {
-					log.Debug().
-						Err(err).
-						Int("len", n).
-						Str("state", "U2I").
-						Int("addrType", version).
-						Str("srcIP", packet.SrcIP.String()).
-						Str("dstIP", packet.DstIP.String()).
-						Msg(pipe + "Failed to send packet")
-				} else {
-					log.Debug().
-						Int("len", n).
-						Str("state", "U2I").
-						Int("addrType", version).
-						Str("srcIP", packet.SrcIP.String()).
-						Str("dstIP", packet.DstIP.String()).
-						Msg(pipe + "Sent a packet")
-				}
-				key := fmt.Sprintf("%v=>%v", packet.SrcIP, packet.DstIP)
-				server.Cache.Set(key, peer, cache.DefaultExpiration)
-			} else {
+			if server.PacketAPI(server.Conn, peer, packet) {
 				log.Debug().
 					Int("len", n).
 					Str("state", "U2I").
@@ -375,7 +367,30 @@ func (server *Server) MakeUdpPipe(authLayer uint8) {
 					Str("srcIP", packet.SrcIP.String()).
 					Str("dstIP", packet.DstIP.String()).
 					Msg(pipe + "Got API packet")
+				continue
 			}
+			if _, err = server.Interface.Write(packet.Data); err != nil {
+				log.Debug().
+					Err(err).
+					Int("len", n).
+					Str("state", "U2I").
+					Int("addrType", version).
+					Str("srcIP", packet.SrcIP.String()).
+					Str("dstIP", packet.DstIP.String()).
+					Msg(pipe + "Failed to send packet")
+				continue
+			}
+
+			log.Debug().
+				Int("len", n).
+				Str("state", "U2I").
+				Int("addrType", version).
+				Str("srcIP", packet.SrcIP.String()).
+				Str("dstIP", packet.DstIP.String()).
+				Msg(pipe + "Sent a packet")
+
+			key := fmt.Sprintf("%v=>%v", packet.SrcIP, packet.DstIP)
+			server.Cache.Set(key, peer, cache.DefaultExpiration)
 		}
 	}, true)
 }

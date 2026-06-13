@@ -7,8 +7,6 @@ import (
 	"os/signal"
 	"syscall"
 
-	"github.com/google/gopacket"
-	"github.com/google/gopacket/layers"
 	"github.com/rs/zerolog/log"
 )
 
@@ -120,6 +118,9 @@ func (client *Client) ListenUnsafe() {
 
 	go funcSafe("Network=>Interface", func() {
 		buf := make([]byte, 1500)
+		var n int
+		var packet *Packet
+
 		for {
 			select {
 			case <-client.Stopping:
@@ -127,11 +128,11 @@ func (client *Client) ListenUnsafe() {
 			default:
 			}
 
-			n, err := client.Session.Read(buf)
+			n, err = client.Session.Read(buf)
 			if err != nil || n == 0 {
 				continue
 			}
-			packet, err := UnmarshalPacket(buf[:n])
+			packet, err = UnmarshalPacket(buf[:n])
 			if err != nil {
 				log.Debug().
 					Err(err).
@@ -142,22 +143,7 @@ func (client *Client) ListenUnsafe() {
 			}
 			switch packet.AddrType {
 			case 4:
-				if !client.PacketAPI(client.Conn, client.ServerAddr, packet) {
-					if _, err = client.Interface.Write(packet.Data); err != nil {
-						log.Debug().
-							Err(err).
-							Str("state", "N2I").
-							Int("len", n).
-							Int("addrType", int(packet.AddrType)).
-							Msg("(Network=>Interface) Cannot send packet")
-					} else {
-						log.Debug().
-							Str("state", "N2I").
-							Int("len", n).
-							Int("addrType", int(packet.AddrType)).
-							Msg("(Network=>Interface) Sent a packet")
-					}
-				} else {
+				if client.PacketAPI(client.Conn, client.ServerAddr, packet) {
 					log.Debug().
 						Int("len", n).
 						Str("state", "N2I").
@@ -165,7 +151,22 @@ func (client *Client) ListenUnsafe() {
 						Str("srcIP", packet.SrcIP.String()).
 						Str("dstIP", packet.DstIP.String()).
 						Msg("(Network=>Interface) Got API packet")
+					continue
 				}
+				if _, err = client.Interface.Write(packet.Data); err != nil {
+					log.Debug().
+						Err(err).
+						Str("state", "N2I").
+						Int("len", n).
+						Int("addrType", int(packet.AddrType)).
+						Msg("(Network=>Interface) Cannot send packet")
+					continue
+				}
+				log.Debug().
+					Str("state", "N2I").
+					Int("len", n).
+					Int("addrType", int(packet.AddrType)).
+					Msg("(Network=>Interface) Sent a packet")
 			case 6:
 				continue
 
@@ -177,6 +178,13 @@ func (client *Client) ListenUnsafe() {
 
 	go funcSafe("Network<=Interface", func() {
 		buffer := make([]byte, 1500)
+		srcIP := make(net.IP, 4)
+		dstIP := make(net.IP, 4)
+		var version byte
+		var n int
+		var packet *Packet
+		var bytes []byte
+
 		for {
 			select {
 			case <-client.Stopping:
@@ -184,30 +192,34 @@ func (client *Client) ListenUnsafe() {
 			default:
 			}
 
-			n, err := client.Interface.Read(buffer)
+			n, err = client.Interface.Read(buffer)
 			if err != nil || n == 0 {
 				continue
 			}
 
-			version := buffer[0] >> 4
+			version = buffer[0] >> 4
 			switch version {
 			case 4:
-				gop := gopacket.NewPacket(buffer[:n], layers.LayerTypeIPv4, gopacket.NoCopy)
-				ip4 := gop.Layer(layers.LayerTypeIPv4).(*layers.IPv4)
+				if n < 20 {
+					continue
+				}
 
-				if client.FilterIPs4(ip4) {
-					packet, err := MakeDefaultPacket(ip4.SrcIP, ip4.DstIP, buffer[:n])
+				copy(srcIP, buffer[12:16]) // Src
+				copy(dstIP, buffer[16:20]) // Dst
+
+				if client.FilterIPs4(dstIP) {
+					packet, err = MakeDefaultPacket(srcIP, dstIP, buffer[:n])
 					if err != nil {
 						log.Error().
 							Err(err).
 							Str("state", "I2N").
 							Int("len", n).
-							Str("srcIP", ip4.SrcIP.String()).
-							Str("dstIP", ip4.DstIP.String()).
+							Str("srcIP", srcIP.String()).
+							Str("dstIP", dstIP.String()).
 							Msg("(Network<=Interface) Failed to make a packet")
 						continue
 					}
-					bytes, err := MarshalPacket(packet)
+					bytes, err = MarshalPacket(packet)
 					if err != nil {
 						log.Debug().
 							Err(err).
@@ -224,23 +236,16 @@ func (client *Client) ListenUnsafe() {
 							Int("len", n).
 							Int("addrType", int(packet.AddrType)).
 							Msg("(Network<=Interface) Failed to send packet")
-					} else {
-						log.Debug().
-							Str("state", "I2N").
-							Int("len", n).
-							Int("addrType", int(packet.AddrType)).
-							Msg("(Network<=Interface) Sent a packet")
+						continue
 					}
+					log.Debug().
+						Str("state", "I2N").
+						Int("len", n).
+						Int("addrType", int(packet.AddrType)).
+						Msg("(Network<=Interface) Sent a packet")
 				}
 
 			case 6:
-				//gop := gopacket.NewPacket(buffer[:n], layers.LayerTypeIPv6, gopacket.NoCopy)
-				//ip6 := gop.Layer(layers.LayerTypeIPv6).(*layers.IPv6)
-				//log.Warn().
-				//	Int("len", n).
-				//	Str("state", "I2U").
-				//	Int("addrType", int(version)).
-				//	Msg("(Network<=Interface) IPv6 not supported")
 				continue
 
 			default:
@@ -270,10 +275,9 @@ func (client *Client) Stop(msg string) {
 	}
 }
 
-func (client *Client) FilterIPs4(packet *layers.IPv4) bool {
-	return !packet.DstIP.IsMulticast() && !packet.DstIP.IsLinkLocalUnicast() && !packet.DstIP.IsLoopback() &&
-		!packet.DstIP.Equal(net.IPv4bcast) && !packet.DstIP.Equal(*client.VirtualIP) &&
-		!packet.DstIP.Equal(client.Net.IP) && !isSubnetBroadcast(packet.DstIP, client.Net)
+func (client *Client) FilterIPs4(ip net.IP) bool {
+	return !ip.IsMulticast() && !ip.IsLinkLocalUnicast() && !ip.IsLoopback() && !ip.Equal(net.IPv4bcast) &&
+		!ip.Equal(*client.VirtualIP) && !ip.Equal(client.Net.IP) && !isSubnetBroadcast(ip, client.Net)
 }
 func isSubnetBroadcast(ip net.IP, ipNet *net.IPNet) bool {
 	ip4 := ip.To4()
