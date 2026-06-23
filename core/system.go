@@ -73,6 +73,7 @@ type Tunnel struct {
 
 	bypassingIPs []string
 	State        atomic.Int32
+	IPv6Disabled bool
 }
 type TunnelState int32
 
@@ -91,6 +92,7 @@ func NewTunnel(destinationIP, netCidr, gatewayIP, IfaceName string, whitelist []
 		IfaceName:     IfaceName,
 		NetCIDR:       netCidr,
 		NetGateway:    gatewayIP,
+		IPv6Disabled:  false,
 	}
 	tun.State.Store(int32(Closed))
 	return tun
@@ -177,8 +179,6 @@ func (tunnel *Tunnel) Start(interfaceIP string) error {
 				ExecCmd("ip", "route", "add", tunnel.DestinationIP, "dev", tunnel.IfaceName)
 				// Route all
 				ExecCmd("ip", "route", "add", "default", "dev", tunnel.IfaceName)
-				// disable IPv6
-				ExecCmd("sysctl", "-w", fmt.Sprintf("net.ipv6.conf.%s.disable_ipv6=1", tunnel.IfaceName))
 
 				log.Info().
 					Str("state", "configTunnel").
@@ -238,6 +238,11 @@ func (tunnel *Tunnel) Start(interfaceIP string) error {
 				"--clamp-mss-to-pmtu",
 			)
 		}
+		// disable IPv6
+		if !tunnel.IPv6Disabled {
+			ExecCmd("sysctl", "-w", fmt.Sprintf("net.ipv6.conf.%s.disable_ipv6=1", tunnel.IfaceName))
+		}
+		tunnel.IPv6Disabled = true
 
 		ifaceMaskOnes, _ := ipNet.Mask.Size()
 		// tun interface off
@@ -280,7 +285,10 @@ func (tunnel *Tunnel) Start(interfaceIP string) error {
 			"store=persistent",
 		)
 		// disable IPv6
-		ExecCmd("netsh", "interface", "ipv6", "set", "interface", fmt.Sprintf(`"%s"`, tunnel.IfaceName), "disabled")
+		if !tunnel.IPv6Disabled {
+			ExecCmd("netsh", "interface", "ipv6", "set", "interface", fmt.Sprintf(`"%s"`, tunnel.IfaceName), "disabled")
+		}
+		tunnel.IPv6Disabled = true
 		// ignore IPv6
 		ExecCmd("powershell", "-Command", "Disable-NetAdapterBinding", "-Name", fmt.Sprintf(`"%s"`, tunnel.IfaceName), "-ComponentID", "ms_tcpip6")
 		// disable "Microsoft client"
@@ -373,12 +381,19 @@ func (tunnel *Tunnel) Stop() {
 	tunnel.State.Store(int32(Closing))
 	switch runtime.GOOS {
 	case "windows":
-		ExecCmd("route", "delete", tunnel.DestinationIP)
+		if tunnel.DestinationIP != "" {
+			ExecCmd("route", "delete", tunnel.DestinationIP)
+		}
 		for _, addr := range tunnel.Blacklist {
 			ExecCmd("route", "delete", addr)
 		}
+		ExecCmd("route", "delete", "0.0.0.0", "mask", "0.0.0.0", tunnel.NetGateway)
+		ExecCmd("route", "delete", "8.8.8.8", "mask", "255.255.255.255", tunnel.NetGateway)
+		ExecCmd("netsh", "interface", "ipv4", "set", "dns", fmt.Sprintf(`name="%s"`, tunnel.IfaceName), "dhcp")
 	case "linux":
-		ExecCmd("ip", "route", "del", tunnel.DestinationIP)
+		if tunnel.DestinationIP != "" {
+			ExecCmd("ip", "route", "del", tunnel.DestinationIP)
+		}
 		for _, addr := range tunnel.Blacklist {
 			ExecCmd("ip", "route", "del", addr)
 		}
