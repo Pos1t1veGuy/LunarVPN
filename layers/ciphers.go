@@ -59,5 +59,8 @@ func (xor *XorLayer) Init(ctx *core.SessionContext) error {
 func (xor *XorLayer) Clone() core.NetLayer {
 	return &XorLayer{
 		key: xor.key,
+		BaseLayer: core.BaseLayer{
+			Description: xor.Description,
+		},
 	}
 }

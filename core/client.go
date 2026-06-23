@@ -11,13 +11,16 @@ import (
 )
 
 type Client struct {
-	VirtualIP   *net.IP
-	ServerAddr  *Address
-	WhiteList   []string
-	BlackList   []string
-	LayerChains []NetLayer
-	Stopping    chan struct{}
-	Session     Session
+	Version       string
+	Controller    Controller
+	VirtualIP     *net.IP
+	ServerAddr    *Address
+	WhiteList     []string
+	BlackList     []string
+	LayerChains   []NetLayer
+	Stopping      chan struct{}
+	Session       Session
+	TunnelOnStart bool
 
 	tcpBuffer []byte
 	Endpoint
@@ -25,6 +28,8 @@ type Client struct {
 
 func (client *Client) Connect(addr string, port int, login, password string, layersIndexes []uint8, defaultLayer uint8) bool {
 	var err error
+	client.Controller.Start()
+
 	if client.Session.Type() != "tcp" && client.Session.Type() != "udp" {
 		log.Fatal().
 			Str("state", "connecting").
@@ -47,7 +52,6 @@ func (client *Client) Connect(addr string, port int, login, password string, lay
 			Str("state", "listening").
 			Str("serverAddr", client.ServerAddr.String()).
 			Msg("Failed to connect to server")
-		return false
 	}
 
 	log.Info().
@@ -70,26 +74,37 @@ func (client *Client) Connect(addr string, port int, login, password string, lay
 	client.CIDR = fmt.Sprintf("%s/24", virtualIP4.String())
 	client.Gateway = gatewayIP4.String()
 	client.Tunnel = client.tunFactory(addr, client.CIDR, client.Gateway, client.Interface.Name(), client.WhiteList, client.BlackList)
-	client.Tunnel.Stop() // clear broken routes
-	err = client.Tunnel.Start(client.VirtualIP.String())
 
-	if err != nil {
-		return false
-	}
 	log.Info().
 		Str("state", "connecting").
 		Str("Net", client.CIDR).
 		Msg("Tunnel created")
 
-	return true
+	if client.TunnelOnStart {
+		err = client.Tunnel.Start(client.VirtualIP.String())
+
+		if err != nil {
+			log.Error().
+				Str("state", "connecting").
+				Str("Net", client.CIDR).
+				Err(err).
+				Msg("Tunnel broken")
+		} else {
+			log.Info().
+				Str("state", "connecting").
+				Str("Net", client.CIDR).
+				Msg("Tunnel started")
+		}
+	}
+	return client.Session.GetState() == "connected" && (client.Tunnel.GetState() == "opened" || !client.TunnelOnStart)
 }
 
 func (client *Client) ListenUnsafe() {
+	defer client.Session.Close()
+	defer client.Tunnel.Stop()
 	defer log.Info().
 		Str("state", "listening").
 		Msg("Client disconnected")
-	defer client.Session.Close()
-	defer client.Tunnel.Stop()
 
 	go func() {
 		c := make(chan os.Signal, 1)
@@ -272,6 +287,7 @@ func (client *Client) Stop(msg string) {
 	default:
 		close(client.Stopping)
 		log.Info().Str("state", "stopping").Msg(msg)
+		_ = client.Session.Close()
 	}
 }
 

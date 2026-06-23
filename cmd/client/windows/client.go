@@ -9,6 +9,7 @@ import (
 	"runtime"
 	"strconv"
 	"strings"
+	"syscall"
 	"time"
 
 	"github.com/Pos1t1veGuy/LunarVPN/core"
@@ -18,6 +19,14 @@ import (
 
 const CurrentVersion = "1.0.3"
 
+var (
+	kernel32 = syscall.NewLazyDLL("kernel32.dll")
+	user32   = syscall.NewLazyDLL("user32.dll")
+
+	getConsoleWindow = kernel32.NewProc("GetConsoleWindow")
+	showWindow       = user32.NewProc("ShowWindow")
+)
+
 func main() {
 	validLogLevels := map[string]struct{}{
 		"debug": {},
@@ -25,15 +34,11 @@ func main() {
 		"warn":  {},
 		"error": {},
 	}
-	validConnTypes := map[string]core.Session{
-		"udp":     core.NewUdpSession(5 * time.Second),
-		"udpPool": core.NewUdpSessionPool(8, 5*time.Second, 4*time.Second),
-		//"tcp":     core.NewTcpSession(5 * time.Second),
-		//"tcpPool": core.NewTcpSessionPool(8, 5*time.Second, 4*time.Second),
-	}
-	lrs := []core.NetLayer{
-		core.NewDebugLayer(false, false),
-		layers.NewXorLayer([]byte("LunarVPN")),
+	validConnTypes := map[string]func() core.Session{
+		"udp":     func() core.Session { return core.NewUdpSession(5 * time.Second) },
+		"udpPool": func() core.Session { return core.NewUdpSessionPool(8, 5*time.Second, 4*time.Second) },
+		//"tcp":     func() core.Session { return core.NewTcpSession(5 * time.Second) },
+		//"tcpPool": func() core.Session { return core.NewTcpSessionPool(8, 5*time.Second, 4*time.Second) },
 	}
 	_ = replaceStarterIfNewExists()
 
@@ -55,6 +60,11 @@ func main() {
 		"1",
 		"comma-separated layer indexes, e.g. 1,4,5 (use -listLayers to view, by default using Xor -laysers=1)",
 	)
+	cipherKey := flag.String(
+		"cipherKey",
+		"LunarVPN",
+		"Key to encrypt network traffic",
+	)
 	listLayers := flag.Bool(
 		"listLayers",
 		false,
@@ -64,6 +74,17 @@ func main() {
 		"version",
 		false,
 		"print version and exit",
+	)
+	hideConsole := flag.Bool(
+		"hideConsole",
+		false,
+		"hide client console log",
+	)
+	openTunnel := flag.Bool(
+		"openTunnel",
+		true,
+		"opens a tunnel on a start. A tunnel is a system interface that allows traffic to be routed from the system"+
+			"to the network via a VPN. It may be started/closed on a start or after some time if you want. By default 'true'",
 	)
 	wlPath := flag.String(
 		"whitelist",
@@ -84,6 +105,17 @@ func main() {
 	if *version {
 		fmt.Println(CurrentVersion)
 		os.Exit(0)
+	}
+	if *hideConsole {
+		hwnd, _, _ := getConsoleWindow.Call()
+		if hwnd != 0 {
+			showWindow.Call(hwnd, uintptr(0))
+		}
+	}
+
+	lrs := []core.NetLayer{
+		core.NewDebugLayer(false, false),
+		layers.NewXorLayer([]byte(*cipherKey)),
 	}
 	if *listLayers {
 		fmt.Println("Available layers:")
@@ -108,7 +140,8 @@ func main() {
 
 	layersIndexes, err := parseLayers(*layersArg, lrs)
 	if err != nil {
-		fmt.Println(err)
+		log.Fatal().Err(err).Msg("failed to parse layers")
+		os.Exit(1)
 	}
 
 	whitelist, err := loadListFile(*wlPath, "# Place IPs line by line to exclude them from routing.\n"+
@@ -125,9 +158,9 @@ func main() {
 	if err != nil {
 		log.Fatal().
 			Err(err).
-			Str("state", "whiteListSetup").
+			Str("state", "blackListSetup").
 			Str("path", *blPath).
-			Msg("Failed to load whitelist")
+			Msg("Failed to load blacklist")
 		flag.Usage()
 	}
 
@@ -137,7 +170,7 @@ func main() {
 		os.Exit(1)
 	}
 
-	cl := core.NewWindowsClient(*appHost, *appPort, whitelist, blacklist, lrs, validConnTypes[*connType])
+	cl := core.NewWindowsClient(CurrentVersion, *appHost, *appPort, whitelist, blacklist, lrs, validConnTypes[*connType](), *openTunnel)
 	connected := cl.Connect(*serHost, *serPort, *login, *password, layersIndexes, uint8(*defaultLayer))
 	if connected == true {
 		cl.Listen()
@@ -214,19 +247,19 @@ func parseLayers(input string, availableLayers []core.NetLayer) ([]uint8, error)
 	return result, nil
 }
 
-func replaceStarterIfNewExists() error {
+func replaceStarterIfNewExists() (err error) {
 	starterFile := "starter"
 	if runtime.GOOS == "windows" {
 		starterFile = "starter.exe"
 	}
 	newFile := starterFile + ".new"
 
-	if _, err := os.Stat(newFile); err == nil {
-		if err := os.Remove(starterFile); err != nil && !os.IsNotExist(err) {
+	if _, err = os.Stat(newFile); err == nil {
+		if err = os.Remove(starterFile); err != nil && !os.IsNotExist(err) {
 			return err
 		}
 
-		if err := os.Rename(newFile, starterFile); err != nil {
+		if err = os.Rename(newFile, starterFile); err != nil {
 			return err
 		}
 	}

@@ -14,6 +14,7 @@ import (
 	"strconv"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"time"
 
 	"github.com/rs/zerolog"
@@ -71,10 +72,19 @@ type Tunnel struct {
 	NetGateway    string
 
 	bypassingIPs []string
+	State        atomic.Int32
 }
+type TunnelState int32
+
+const (
+	Closed TunnelState = iota
+	Opening
+	Opened
+	Closing
+)
 
 func NewTunnel(destinationIP, netCidr, gatewayIP, IfaceName string, whitelist []string, blacklist []string) *Tunnel {
-	return &Tunnel{
+	tun := &Tunnel{
 		DestinationIP: destinationIP,
 		Whitelist:     whitelist,
 		Blacklist:     blacklist,
@@ -82,13 +92,33 @@ func NewTunnel(destinationIP, netCidr, gatewayIP, IfaceName string, whitelist []
 		NetCIDR:       netCidr,
 		NetGateway:    gatewayIP,
 	}
+	tun.State.Store(int32(Closed))
+	return tun
+}
+
+func (tunnel *Tunnel) GetState() string {
+	state := TunnelState(tunnel.State.Load())
+	switch state {
+	case Closed:
+		return "closed"
+	case Opening:
+		return "opening"
+	case Opened:
+		return "opened"
+	case Closing:
+		return "closing"
+	default:
+		return "unknown"
+	}
 }
 
 func (tunnel *Tunnel) Start(interfaceIP string) error {
+	tunnel.State.Store(int32(Opening))
 	tunnel.InterfaceIP = interfaceIP
 
 	ip, ipNet, err := net.ParseCIDR(tunnel.NetCIDR)
 	if err != nil {
+		tunnel.State.Store(int32(Closed))
 		log.Error().
 			Err(err).
 			Str("state", "configTunnel").
@@ -100,6 +130,7 @@ func (tunnel *Tunnel) Start(interfaceIP string) error {
 	// getting interfaces info
 	defIfaceName, defIfaceIP, defIfaceIndex, err := getDefaultInterface()
 	if err != nil {
+		tunnel.State.Store(int32(Closed))
 		log.Error().
 			Err(err).
 			Str("state", "configTunnel").
@@ -114,6 +145,7 @@ func (tunnel *Tunnel) Start(interfaceIP string) error {
 		Msg("Default adapter info")
 	curIface, err := net.InterfaceByName(tunnel.IfaceName)
 	if err != nil {
+		tunnel.State.Store(int32(Closed))
 		log.Error().
 			Err(err).
 			Str("state", "configTunnel").
@@ -134,6 +166,7 @@ func (tunnel *Tunnel) Start(interfaceIP string) error {
 			if len(tunnel.Whitelist) == 0 {
 				defGatewayIP, err := getDefaultGatewayLinux()
 				if err != nil {
+					tunnel.State.Store(int32(Closed))
 					log.Error().
 						Err(err).
 						Str("state", "configTunnel").
@@ -152,7 +185,7 @@ func (tunnel *Tunnel) Start(interfaceIP string) error {
 					Msg("Routed all IPs into tunnel")
 
 				for _, addr := range tunnel.Blacklist {
-					ip := net.ParseIP(addr)
+					ip = net.ParseIP(addr)
 					if ip != nil && ip.IsGlobalUnicast() && addr != tunnel.DestinationIP {
 						ExecCmd("ip", "route", "add", addr, "via", defGatewayIP.String(), "dev", "eth0")
 						log.Info().
@@ -220,6 +253,7 @@ func (tunnel *Tunnel) Start(interfaceIP string) error {
 		ExecCmd("ip", "link", "set", "dev", tunnel.IfaceName, "up")
 
 	case "darwin":
+		tunnel.State.Store(int32(Closed))
 		log.Error().
 			Err(err).
 			Str("state", "configTunnel").
@@ -258,6 +292,7 @@ func (tunnel *Tunnel) Start(interfaceIP string) error {
 				// excluding route to remove connection loop
 				defGatewayIP, err := getDefaultGatewayWindows()
 				if err != nil {
+					tunnel.State.Store(int32(Closed))
 					log.Error().
 						Err(err).
 						Str("state", "configTunnel").
@@ -327,26 +362,28 @@ func (tunnel *Tunnel) Start(interfaceIP string) error {
 		ExecCmd("netsh", "interface", "ipv4", "set", "interface", strconv.Itoa(curIface.Index), "metric=10")
 
 	default:
+		tunnel.State.Store(int32(Closed))
 		return fmt.Errorf("not support os:%v", runtime.GOOS)
 	}
+	tunnel.State.Store(int32(Opened))
 	return nil
 }
 
 func (tunnel *Tunnel) Stop() {
-	if tunnel.DestinationIP != "" && len(tunnel.Whitelist) != 0 {
-		switch runtime.GOOS {
-		case "windows":
-			ExecCmd("route", "delete", tunnel.DestinationIP)
-			for _, addr := range tunnel.Blacklist {
-				ExecCmd("route", "delete", addr)
-			}
-		case "linux":
-			ExecCmd("ip", "route", "del", tunnel.DestinationIP)
-			for _, addr := range tunnel.Blacklist {
-				ExecCmd("ip", "route", "del", addr)
-			}
+	tunnel.State.Store(int32(Closing))
+	switch runtime.GOOS {
+	case "windows":
+		ExecCmd("route", "delete", tunnel.DestinationIP)
+		for _, addr := range tunnel.Blacklist {
+			ExecCmd("route", "delete", addr)
+		}
+	case "linux":
+		ExecCmd("ip", "route", "del", tunnel.DestinationIP)
+		for _, addr := range tunnel.Blacklist {
+			ExecCmd("ip", "route", "del", addr)
 		}
 	}
+	tunnel.State.Store(int32(Closed))
 }
 
 func ExecCmd(c string, args ...string) string {
@@ -502,10 +539,10 @@ func InitLogger(levelStr string, filename string) {
 	}
 	cw := zerolog.ConsoleWriter{
 		Out:        out,
-		TimeFormat: "15:04:05",
+		TimeFormat: "02 Jan 15:04:0",
 	}
 
-	log.Logger = log.Output(&SyncWriter{w: cw})
+	log.Logger = log.Output(&SyncWriter{w: cw}).With().Caller().Logger()
 	if err != nil {
 		log.Error().
 			Err(err).
@@ -548,34 +585,31 @@ func funcSafe(name string, fn func(), autoRestart bool) {
 
 func formatStack(raw []byte) string {
 	lines := strings.Split(string(raw), "\n")
-
 	var b strings.Builder
 	frameIndex := 0
 
-	for i := 0; i < len(lines)-1; i++ {
-		line := strings.TrimSpace(lines[i])
+	i := 0
+	for i < len(lines)-1 {
+		funcLine := strings.TrimSpace(lines[i])
+		if i+1 >= len(lines) {
+			break
+		}
+		fileLine := strings.TrimSpace(lines[i+1])
 
-		if strings.Contains(line, "runtime/") ||
-			strings.Contains(line, "runtime.") ||
-			strings.Contains(line, "debug.Stack") {
+		if !strings.Contains(fileLine, ".go:") {
+			i++
 			continue
 		}
 
-		if i+1 < len(lines) {
-			fileLine := strings.TrimSpace(lines[i+1])
-
-			if strings.Contains(fileLine, ".go:") {
-				frameIndex++
-				fmt.Fprintf(
-					&b,
-					"\n  #%d  %s\n     -> %s",
-					frameIndex,
-					line,
-					fileLine,
-				)
-				i++
-			}
+		if strings.Contains(fileLine, "runtime/") ||
+			strings.Contains(funcLine, "debug.Stack") {
+			i += 2
+			continue
 		}
+
+		frameIndex++
+		fmt.Fprintf(&b, "\n  #%d  %s\n     -> %s", frameIndex, funcLine, fileLine)
+		i += 2
 	}
 
 	return b.String()

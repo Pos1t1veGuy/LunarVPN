@@ -25,6 +25,8 @@ type Server struct {
 	AnonymousPeer *Peer
 	LayerChains   []NetLayer
 	AuthSystem    Authenticator
+	PingDuration  time.Duration
+	PeerTimeout   time.Duration
 
 	ctx    context.Context
 	cancel context.CancelFunc
@@ -40,6 +42,7 @@ type Peer struct {
 	Context     *SessionContext
 	Handshaked  bool
 
+	LastSeen  time.Time
 	TcpConn   *net.TCPConn
 	tcpBuffer []byte
 	tcpMu     sync.RWMutex
@@ -65,7 +68,8 @@ func NewPeer(virtualIP net.IP, addr *Address, netChain NetLayer, ctx *SessionCon
 	return &Peer{
 		VirtualIP:   virtualIP,
 		Addr:        addr,
-		ConnectedAt: time.Time{},
+		ConnectedAt: time.Now(),
+		LastSeen:    time.Now(),
 		NLChain:     netChain,
 		Context:     ctx,
 		Handshaked:  handshaked,
@@ -162,6 +166,8 @@ func (server *Server) StartUnsafe(defaultLayer uint8) {
 	server.MakeInterfacePipe()
 	server.MakeUdpPipe(defaultLayer)
 	server.ListenAndServeTCP(defaultLayer)
+	go server.PingLoop()
+	go server.PeerViewLoop()
 	<-sigs // waiting for Ctrl+C
 }
 
@@ -273,6 +279,80 @@ func (server *Server) MakeInterfacePipe() {
 	}, true)
 }
 
+func (server *Server) PingLoop() {
+	for {
+		select {
+		case <-server.ctx.Done():
+			return
+		default:
+		}
+
+		var toRemove []*Peer
+		server.mu.Lock()
+		for _, peer := range server.Peers {
+			if time.Since(peer.LastSeen) >= server.PeerTimeout {
+				toRemove = append(toRemove, peer)
+			} else {
+				pingPacket, err := MakePingPacket(peer.VirtualIP, server.IP)
+				if err != nil {
+					log.Error().
+						Str("state", "pingLoop").
+						Err(err).
+						Str("peer", peer.Addr.String()).
+						Msg("Failed to make ping packet")
+				}
+				go server.SendPacket(pingPacket, peer)
+			}
+		}
+		server.mu.Unlock()
+
+		for _, peer := range toRemove {
+			_ = server.DisconnectPeer(peer)
+		}
+		time.Sleep(server.PingDuration)
+	}
+}
+
+func (server *Server) PeerViewLoop() { // for debug first time
+	for {
+		select {
+		case <-server.ctx.Done():
+			return
+		default:
+		}
+		server.logPeersPretty()
+		time.Sleep(server.PingDuration * 50)
+	}
+}
+
+func (server *Server) logPeersPretty() {
+	server.mu.RLock()
+	defer server.mu.RUnlock()
+
+	if len(server.Peers) == 0 {
+		log.Debug().Msg("No active peers")
+		return
+	}
+
+	var sb strings.Builder
+	sb.WriteString("[")
+	i := 0
+	for addr, peer := range server.Peers {
+		if i > 0 {
+			sb.WriteString(", ")
+		}
+		lastSeen := peer.LastSeen.Format("15:04:05")
+		fmt.Fprintf(&sb, "%s(%s, last: %s)", peer.VirtualIP, addr, lastSeen)
+		i++
+	}
+	sb.WriteString("]")
+
+	log.Info().
+		Int("peer_count", len(server.Peers)).
+		Str("peers", sb.String()).
+		Msg("Peers snapshot")
+}
+
 func (server *Server) MakeUdpPipe(authLayer uint8) {
 	pipeType := "UDP"
 
@@ -327,7 +407,9 @@ func (server *Server) MakeUdpPipe(authLayer uint8) {
 						Msg(pipe + "Handshake failed")
 					continue
 				}
+				server.mu.Lock()
 				server.Peers[peerAddrStr] = peer
+				server.mu.Unlock()
 
 				log.Info().
 					Int("len", n).
@@ -359,6 +441,9 @@ func (server *Server) MakeUdpPipe(authLayer uint8) {
 					Msg(pipe + "Failed to marshal packet")
 				continue
 			}
+			server.mu.Lock()
+			peer.LastSeen = time.Now()
+			server.mu.Unlock()
 			if server.PacketAPI(server.Conn, peer, packet) {
 				log.Debug().
 					Int("len", n).
@@ -564,15 +649,14 @@ func (server *Server) DisconnectPeer(peer *Peer) (err error) {
 			Msg("Failed to create disconnect packet")
 	} else {
 		server.SendPacket(packet, peer)
+		log.Info().
+			Str("state", "closing").
+			Str("peer", peer.Addr.String()).
+			Msg("Disconnect packet sent")
 	}
 
 	server.mu.Lock()
 	defer server.mu.Unlock()
-
-	log.Info().
-		Str("state", "closing").
-		Str("peer", peer.Addr.String()).
-		Msg("Disconnect packet sent")
 
 	delete(server.Peers, peer.Addr.String())
 	delete(server.Network.Used, peer.VirtualIP.String())

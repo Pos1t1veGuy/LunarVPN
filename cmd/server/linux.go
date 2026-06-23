@@ -6,6 +6,7 @@ import (
 	"flag"
 	"fmt"
 	"os"
+	"time"
 
 	"github.com/Pos1t1veGuy/LunarVPN/core"
 	"github.com/Pos1t1veGuy/LunarVPN/layers"
@@ -50,6 +51,6 @@ func main() {
 		Allowed: map[string]string{
 			"admin": "admin",
 		},
-	})
+	}, 5*time.Second, 10*time.Second)
 	srv.Start(uint8(*defaultLayer))
 }

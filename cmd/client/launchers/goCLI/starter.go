@@ -232,7 +232,7 @@ func downloadFile(dst, url string) error {
 	fmt.Println()
 	reader := io.TeeReader(resp.Body, pw)
 
-	if _, err := io.Copy(out, reader); err != nil {
+	if _, err = io.Copy(out, reader); err != nil {
 		return err
 	}
 	fmt.Println("\n\ndownload complete")

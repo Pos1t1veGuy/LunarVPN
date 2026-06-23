@@ -81,7 +81,9 @@ func (adapter *WintunAdapter) Close() {
 	adapter.Close()
 }
 
-func NewWindowsClient(addr string, port int, whiteList []string, blackList []string, netLayers []NetLayer, session Session) *Client {
+func NewWindowsClient(version string, addr string, port int, whiteList []string, blackList []string,
+	netLayers []NetLayer, session Session, openTunnel bool) *Client {
+
 	adapter, err := NewWintunAdapter("gotun0", 8*1024*1024)
 	if err != nil {
 		log.Fatal().
@@ -89,12 +91,16 @@ func NewWindowsClient(addr string, port int, whiteList []string, blackList []str
 			Str("state", "starting").
 			Msg("Failed to create adapter")
 	}
-	return &Client{
-		WhiteList:   whiteList,
-		BlackList:   blackList,
-		LayerChains: netLayers,
-		Stopping:    make(chan struct{}),
-		Endpoint:    *NewEndpoint(addr, port, "0.0.0.0/0", "0.0.0.0", adapter, NewTunnel),
-		Session:     session,
+	client := &Client{
+		Version:       version,
+		WhiteList:     whiteList,
+		BlackList:     blackList,
+		LayerChains:   netLayers,
+		Stopping:      make(chan struct{}),
+		Endpoint:      *NewEndpoint(addr, port, "0.0.0.0/0", "0.0.0.0", adapter, NewTunnel),
+		Session:       session,
+		TunnelOnStart: openTunnel,
 	}
+	client.NewHttpController(addr, port)
+	return client
 }

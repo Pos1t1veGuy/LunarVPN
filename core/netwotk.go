@@ -216,7 +216,7 @@ func MakeDisconnectPacket(serverAddr net.IP, clientAddr net.IP) (*Packet, error)
 		return nil, fmt.Errorf("srcIP is not valid IPv%d: %v", srcIPv, srcIP)
 	}
 	if dstIP == nil {
-		return nil, fmt.Errorf("dsrIP is not valid IPv%d: %v", dstIPv, srcIP)
+		return nil, fmt.Errorf("dstIP is not valid IPv%d: %v", dstIPv, srcIP)
 	}
 	if srcIPv != dstIPv {
 		return nil, fmt.Errorf("IP version mismatch: src=%d, dst=%d", srcIPv, dstIPv)
@@ -242,7 +242,7 @@ func MakePingPacket(srcIP net.IP, dstIP net.IP) (*Packet, error) {
 		return nil, fmt.Errorf("srcIP is not valid IPv%d: %v", srcIPv, srcIP)
 	}
 	if dstIP == nil {
-		return nil, fmt.Errorf("dsrIP is not valid IPv%d: %v", dstIPv, srcIP)
+		return nil, fmt.Errorf("dstIP is not valid IPv%d: %v", dstIPv, srcIP)
 	}
 	if srcIPv != dstIPv {
 		return nil, fmt.Errorf("IP version mismatch: src=%d, dst=%d", srcIPv, dstIPv)
@@ -255,6 +255,31 @@ func MakePingPacket(srcIP net.IP, dstIP net.IP) (*Packet, error) {
 		SrcIP:           srcIP,
 		DstIP:           dstIP,
 		Rsv:             [4]byte{0, 0, 0, 1},
+		Length:          0,
+		Data:            nil,
+	}, nil
+}
+func MakePongPacket(srcIP net.IP, dstIP net.IP) (*Packet, error) {
+	srcIPv, srcIP := validateIP(srcIP)
+	dstIPv, dstIP := validateIP(dstIP)
+
+	if srcIP == nil {
+		return nil, fmt.Errorf("srcIP is not valid IPv%d: %v", srcIPv, srcIP)
+	}
+	if dstIP == nil {
+		return nil, fmt.Errorf("dstIP is not valid IPv%d: %v", dstIPv, srcIP)
+	}
+	if srcIPv != dstIPv {
+		return nil, fmt.Errorf("IP version mismatch: src=%d, dst=%d", srcIPv, dstIPv)
+	}
+
+	return &Packet{
+		ProtocolVersion: ProtocolVersion,
+		Type:            1,
+		AddrType:        srcIPv,
+		SrcIP:           srcIP,
+		DstIP:           dstIP,
+		Rsv:             [4]byte{0, 0, 0, 2},
 		Length:          0,
 		Data:            nil,
 	}, nil
@@ -355,7 +380,7 @@ func (server *Server) PacketAPI(conn net.Conn, peer *Peer, packet *Packet) bool 
 			}
 
 		case [4]byte{0, 0, 0, 1}: // ping
-			ping, err := MakePingPacket(server.IP, peer.Addr.IP)
+			pong, err := MakePongPacket(server.IP, peer.Addr.IP)
 			if err != nil {
 				log.Error().
 					Err(err).
@@ -366,7 +391,9 @@ func (server *Server) PacketAPI(conn net.Conn, peer *Peer, packet *Packet) bool 
 					Msg("(Network=>Interface) Failed to make a PING packet")
 				return true
 			}
-			server.SendPacket(ping, peer)
+			server.SendPacket(pong, peer)
+
+		case [4]byte{0, 0, 0, 2}: // pong
 		}
 		return true
 	}
@@ -378,7 +405,19 @@ func (client *Client) PacketAPI(conn net.Conn, serverAddr *Address, packet *Pack
 		switch packet.Rsv {
 		case [4]byte{0, 0, 0, 0}: // disconnect
 			client.Stop("(Network=>Interface) Server disconnected you")
-		case [4]byte{0, 0, 0, 1}: // pong
+		case [4]byte{0, 0, 0, 1}: // ping
+			pong, err := MakePongPacket(*client.VirtualIP, client.ServerAddr.IP)
+			if err != nil {
+				log.Error().
+					Err(err).
+					Str("state", "API").
+					Str("serverIP", serverAddr.IP.String()).
+					Str("localIP", packet.SrcIP.String()).
+					Msg("(Network=>Interface) Failed to make a PONG packet")
+				return true
+			}
+			client.SendPacket(pong)
+		case [4]byte{0, 0, 0, 2}: // pong
 		}
 		return true
 	}
