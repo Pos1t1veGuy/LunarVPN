@@ -17,7 +17,7 @@ import (
 	"github.com/rs/zerolog/log"
 )
 
-const CurrentVersion = "1.0.3"
+const CurrentVersion = "1.0.5"
 
 var (
 	kernel32 = syscall.NewLazyDLL("kernel32.dll")

@@ -554,7 +554,7 @@ func InitLogger(levelStr string, filename string) {
 	}
 	cw := zerolog.ConsoleWriter{
 		Out:        out,
-		TimeFormat: "02 Jan 15:04:0",
+		TimeFormat: "02 Jan 15:04:05",
 	}
 
 	log.Logger = log.Output(&SyncWriter{w: cw}).With().Caller().Logger()

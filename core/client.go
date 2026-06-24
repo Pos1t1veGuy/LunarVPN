@@ -100,7 +100,6 @@ func (client *Client) Connect(addr string, port int, login, password string, lay
 }
 
 func (client *Client) ListenUnsafe() {
-	defer client.Session.Close()
 	defer client.Tunnel.Stop()
 	defer log.Info().
 		Str("state", "listening").

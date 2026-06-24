@@ -35,6 +35,7 @@ func (client *Client) NewHttpController(host string, port int) *HttpController {
 	mux.HandleFunc("POST /tunnel/start", client.startTunnel)
 	mux.HandleFunc("POST /tunnel/stop", client.stopTunnel)
 	mux.HandleFunc("GET /status", client.status)
+	mux.HandleFunc("POST /client/stop", client.stopClient)
 
 	controller.server = &http.Server{
 		Addr:    fmt.Sprintf("%s:%d", host, port),
@@ -139,4 +140,8 @@ func (client *Client) stopTunnel(writer http.ResponseWriter, request *http.Reque
 		Str("state", "disconnecting").
 		Str("Net", client.CIDR).
 		Msg("Tunnel stopped")
+}
+
+func (client *Client) stopClient(writer http.ResponseWriter, request *http.Request) {
+	client.Stop("Closed by API")
 }
