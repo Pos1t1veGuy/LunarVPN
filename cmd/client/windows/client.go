@@ -6,7 +6,6 @@ import (
 	"flag"
 	"fmt"
 	"os"
-	"runtime"
 	"strconv"
 	"strings"
 	"syscall"
@@ -40,7 +39,6 @@ func main() {
 		//"tcp":     func() core.Session { return core.NewTcpSession(5 * time.Second) },
 		//"tcpPool": func() core.Session { return core.NewTcpSessionPool(8, 5*time.Second, 4*time.Second) },
 	}
-	_ = replaceStarterIfNewExists()
 
 	appHost := flag.String("appHost", "127.0.0.1", "application host")
 	appPort := flag.Int("appPort", 8080, "application port")
@@ -63,7 +61,7 @@ func main() {
 	cipherKey := flag.String(
 		"cipherKey",
 		"LunarVPN",
-		"Key to encrypt network traffic",
+		"Key to encrypt network traffic \"[a-z][0-9]_-\"",
 	)
 	listLayers := flag.Bool(
 		"listLayers",
@@ -245,24 +243,4 @@ func parseLayers(input string, availableLayers []core.NetLayer) ([]uint8, error)
 	}
 
 	return result, nil
-}
-
-func replaceStarterIfNewExists() (err error) {
-	starterFile := "starter"
-	if runtime.GOOS == "windows" {
-		starterFile = "starter.exe"
-	}
-	newFile := starterFile + ".new"
-
-	if _, err = os.Stat(newFile); err == nil {
-		if err = os.Remove(starterFile); err != nil && !os.IsNotExist(err) {
-			return err
-		}
-
-		if err = os.Rename(newFile, starterFile); err != nil {
-			return err
-		}
-	}
-
-	return nil
 }
