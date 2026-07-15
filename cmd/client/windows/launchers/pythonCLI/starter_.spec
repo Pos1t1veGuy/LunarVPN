@@ -7,7 +7,7 @@ tools_root = Path(SPECPATH).parent / 'lau_tools'
 
 
 a = Analysis(
-    ['StarterCLI.py'],
+    ['starter.py'],
     pathex=[],
     binaries=[],
     datas=[(str(tools_root), 'lau_tools')],
@@ -27,7 +27,7 @@ exe = EXE(
     a.binaries,
     a.datas,
     [],
-    name='STARTER',
+    name='StarterCLI',
     debug=False,
     bootloader_ignore_signals=False,
     strip=False,

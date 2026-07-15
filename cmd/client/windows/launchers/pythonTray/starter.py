@@ -312,7 +312,7 @@ if __name__ == '__main__':
             check_updates(root=root)
 
         user_params = [argv for argv in sys.argv[1:] if not argv == '--update_skip']
-        tray = Tray(BASE_DIR / "icon.png", ClientApplication(VPN_SERVER_URL), root, user_params)
+        tray = Tray("icon.png", ClientApplication(VPN_SERVER_URL), root, user_params)
 
         tray.run()
         root.mainloop()

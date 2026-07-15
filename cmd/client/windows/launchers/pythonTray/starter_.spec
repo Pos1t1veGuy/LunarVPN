@@ -4,13 +4,14 @@ import sys
 from pathlib import Path
 
 tools_root = Path(SPECPATH).parent / 'lau_tools'
+icon_path = Path(SPECPATH) / 'icon.png'
 
 
 a = Analysis(
-    ['StarterTray.py'],
+    ['starter.py'],
     pathex=[],
     binaries=[],
-    datas=[(str(tools_root), 'lau_tools')],
+    datas=[(str(tools_root), 'lau_tools'), (str(icon_path), '.')],
     hiddenimports=[],
     hookspath=[],
     hooksconfig={},
@@ -27,7 +28,7 @@ exe = EXE(
     a.binaries,
     a.datas,
     [],
-    name='STARTER',
+    name='StarterTray',
     debug=False,
     bootloader_ignore_signals=False,
     strip=False,

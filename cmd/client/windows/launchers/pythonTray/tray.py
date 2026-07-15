@@ -34,13 +34,21 @@ def get_lunar_files() -> List[Path]:
 
 
 class Tray:
-    def __init__(self, icon: Path, client: 'ClientApplication', root: tk.Tk, user_params: List[str]):
+    def __init__(self, icon: str, client: 'ClientApplication', root: tk.Tk, user_params: List[str]):
         self.profile_file = None
         self.reconnecting = False
 
         self.root = root
-        self.icon_path = icon
-        self.icon_image = Image.open(str(self.icon_path))
+        self.icon_path = Path(icon)
+        self.path = Path(__file__).parent
+
+        if os.path.isfile(str(self.icon_path)):
+            print(1, str(self.icon_path))
+            self.icon_image = Image.open(str(self.icon_path))
+        else:
+            self.icon_path = self.path / self.icon_path
+            print(2, str(self.icon_path))
+            self.icon_image = Image.open(self.path / str(self.icon_path))
         self.client = client
         self.icon = pystray.Icon('lunarvpn', self.icon_image, 'LunarVPN', self.build_menu())
         self.menu_update_thread = threading.Thread(target=self._menu_update_loop, daemon=True)
@@ -94,7 +102,7 @@ class Tray:
 
         if not successful_start:
             process.kill()
-            messagebox.showerror("Failed to make connection!", f"See the logs at {Path(__file__).parent}")
+            messagebox.showerror("Failed to make connection!", "See the logs")
 
         self.reconnecting = not successful_start
         self.profile_file = Path(config_file).name
