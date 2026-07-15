@@ -37,6 +37,8 @@ type Endpoint struct {
 	Tunnel     *Tunnel
 }
 
+const projectPrefix = "mvpn/"
+
 func NewEndpoint(addr string, port int, CIDR, gatewayIP string, iface InterfaceAdapter,
 	tunFactory func(destinationIP, netCidr, gatewayIP, IfaceName string, whitelist []string, blacklist []string) *Tunnel,
 ) *Endpoint {
@@ -317,7 +319,7 @@ func (tunnel *Tunnel) Start(interfaceIP string) error {
 					Msg("Routed all IPs into tunnel")
 
 				for _, addr := range tunnel.Blacklist {
-					ip := net.ParseIP(addr)
+					ip = net.ParseIP(addr)
 					if ip != nil && ip.IsGlobalUnicast() && addr != tunnel.DestinationIP {
 						ExecCmd("route", "add", addr, "mask", "255.255.255.255", defGatewayIP.String(), "metric", "1",
 							"if", strconv.Itoa(defIfaceIndex))
@@ -367,7 +369,7 @@ func (tunnel *Tunnel) Start(interfaceIP string) error {
 				"addr=1.1.1.1", "index=2")
 		}
 		// set metric to interface
-		ExecCmd("netsh", "interface", "ipv4", "set", "interface", strconv.Itoa(curIface.Index), "metric=10")
+		ExecCmd("netsh", "interface", "ipv4", "set", "interface", strconv.Itoa(curIface.Index), "metric=1")
 
 	default:
 		tunnel.State.Store(int32(Closed))
@@ -460,19 +462,31 @@ func getDefaultGatewayWindows() (net.IP, error) {
 	}
 
 	lines := strings.Split(string(out), "\n")
+	var bestGW net.IP
+	bestMetric := -1
+
 	for _, line := range lines {
 		fields := strings.Fields(line)
-		if len(fields) >= 5 &&
-			fields[0] == "0.0.0.0" &&
-			fields[1] == "0.0.0.0" {
+		if len(fields) < 5 {
+			continue
+		}
+		if fields[0] == "0.0.0.0" && fields[1] == "0.0.0.0" {
 
 			gw := net.ParseIP(fields[2]).To4()
-			if gw != nil && gw[0] == 192 && gw[1] == 168 {
-				return gw, nil
+			metric, err := strconv.Atoi(fields[4])
+			if err != nil {
+				continue
+			}
+			if bestMetric == -1 || metric < bestMetric {
+				bestMetric = metric
+				bestGW = gw
 			}
 		}
 	}
-	return nil, errors.New("default gateway not found")
+	if bestGW == nil {
+		return nil, errors.New("default gateway not found")
+	}
+	return bestGW, nil
 }
 
 func getDefaultGatewayLinux() (net.IP, error) {
@@ -528,9 +542,16 @@ func (s *SyncWriter) Write(p []byte) (n int, err error) {
 	return s.w.Write(p)
 }
 
-func InitLogger(levelStr string, filename string) {
+func InitLogger(levelStr string, filename string) io.Closer {
 	stdlog.SetOutput(io.Discard)
 	zerolog.TimeFieldFormat = time.RFC3339
+
+	zerolog.CallerMarshalFunc = func(pc uintptr, file string, line int) string {
+		if idx := strings.Index(file, projectPrefix); idx >= 0 {
+			file = file[idx:]
+		}
+		return fmt.Sprintf("%s:%d", file, line)
+	}
 
 	level, err := zerolog.ParseLevel(strings.ToLower(levelStr))
 	if err != nil {
@@ -538,32 +559,40 @@ func InitLogger(levelStr string, filename string) {
 	}
 	zerolog.SetGlobalLevel(level)
 
-	var out io.Writer
+	console := zerolog.ConsoleWriter{
+		Out:        os.Stdout,
+		TimeFormat: "02 Jan 15:04:05",
+		NoColor:    false,
+	}
+
+	writers := []io.Writer{console}
+
+	var FILE *os.File
 	if filename != "" {
-		file, err := os.OpenFile(filename, os.O_CREATE|os.O_APPEND|os.O_WRONLY, 0644)
+		FILE, err = os.OpenFile(filename, os.O_CREATE|os.O_APPEND|os.O_WRONLY, 0644)
 		if err != nil {
 			log.Fatal().
 				Err(err).
 				Str("state", "logSetup").
 				Msg("Cannot open log file")
 		}
+		fileWriter := zerolog.ConsoleWriter{
+			Out:        FILE,
+			TimeFormat: "02 Jan 15:04:05",
+			NoColor:    true,
+		}
+		writers = append(writers, fileWriter)
 
-		out = io.MultiWriter(os.Stdout, file)
-	} else {
-		out = os.Stdout
-	}
-	cw := zerolog.ConsoleWriter{
-		Out:        out,
-		TimeFormat: "02 Jan 15:04:05",
 	}
 
-	log.Logger = log.Output(&SyncWriter{w: cw}).With().Caller().Logger()
+	log.Logger = zerolog.New(zerolog.MultiLevelWriter(writers...)).With().Timestamp().Caller().Logger()
 	if err != nil {
 		log.Error().
 			Err(err).
 			Str("state", "logSetup").
 			Msg("Failed to parse log level")
 	}
+	return FILE
 }
 
 func contains(slice []string, str string) bool {

@@ -1,11 +1,16 @@
 # -*- mode: python ; coding: utf-8 -*-
+import os
+import sys
+from pathlib import Path
+
+tools_root = Path(SPECPATH).parent / 'lau_tools'
 
 
 a = Analysis(
-    ['C:\\Users\\UDor\\Desktop\\go\\mvpn\\cmd\\client\\launchers\\pythonCLI\\starter.py'],
+    ['StarterCLI.py'],
     pathex=[],
     binaries=[],
-    datas=[],
+    datas=[(str(tools_root), 'lau_tools')],
     hiddenimports=[],
     hookspath=[],
     hooksconfig={},
@@ -22,7 +27,7 @@ exe = EXE(
     a.binaries,
     a.datas,
     [],
-    name='starter',
+    name='STARTER',
     debug=False,
     bootloader_ignore_signals=False,
     strip=False,

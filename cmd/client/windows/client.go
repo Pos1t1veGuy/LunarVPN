@@ -6,6 +6,7 @@ import (
 	"flag"
 	"fmt"
 	"os"
+	"path/filepath"
 	"strconv"
 	"strings"
 	"syscall"
@@ -16,7 +17,7 @@ import (
 	"github.com/rs/zerolog/log"
 )
 
-const CurrentVersion = "1.0.5"
+const CurrentVersion = "1.0.8"
 
 var (
 	kernel32 = syscall.NewLazyDLL("kernel32.dll")
@@ -94,10 +95,15 @@ func main() {
 		"blacklist.txt",
 		"path to blacklist file",
 	)
+	dir, err := os.Getwd()
+	if err != nil {
+		fmt.Printf("Error os.Getwd(): %v\n", err)
+		os.Exit(1)
+	}
 	logFilePath := flag.String(
 		"logfile",
-		"",
-		"path to logfile (by default logfile=\"\", so it is disabled)",
+		filepath.Join(dir, "LOG.txt"),
+		"path to logfile (logfile=\"\" to disable, by default \"LOG.txt\" in application folder)",
 	)
 	flag.Parse()
 	if *version {
@@ -128,7 +134,8 @@ func main() {
 		flag.Usage()
 		os.Exit(1)
 	}
-	core.InitLogger(*logLevel, *logFilePath)
+	closer := core.InitLogger(*logLevel, *logFilePath)
+	defer closer.Close()
 
 	if _, ok := validConnTypes[*connType]; !ok {
 		_, _ = fmt.Fprintf(os.Stderr, "invalid connType: %q\n", *connType)

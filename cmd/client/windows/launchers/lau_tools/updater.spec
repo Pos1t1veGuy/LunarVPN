@@ -2,7 +2,7 @@
 
 
 a = Analysis(
-    ['starter.py'],
+    ['C:\\Users\\UDor\\Desktop\\go\\mvpn\\cmd\\client\\windows\\launchers\\updater.py'],
     pathex=[],
     binaries=[],
     datas=[],
@@ -22,7 +22,7 @@ exe = EXE(
     a.binaries,
     a.datas,
     [],
-    name='STARTER',
+    name='updater',
     debug=False,
     bootloader_ignore_signals=False,
     strip=False,

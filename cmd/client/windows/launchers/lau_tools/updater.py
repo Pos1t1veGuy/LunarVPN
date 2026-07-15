@@ -1,12 +1,16 @@
+from typing import *
 import sys, os
 import zipfile
 import time
 from pathlib import Path
 
-# launch "updater {zippath}"
+from . import run_as_admin
 
-current_name = os.path.basename(sys.executable)
-current_dir = Path(sys.executable).parent
+# launch "updater {zippath} {starter_params...}"
+
+current_name = os.path.basename(sys.argv[0])
+current_dir = Path(sys.argv[0]).parent
+starter_path = current_dir / "starter.exe"
 
 if len(sys.argv) <= 1:
     print('\n[e] Please provide zip file path')
@@ -34,4 +38,5 @@ with zipfile.ZipFile(sys.argv[1], 'r') as zf:
 
 os.remove(sys.argv[1])
 print(f'[+] Replacing finished')
-sys.exit(0)
+
+run_as_admin(str(starter_path), sys.argv[2:])
