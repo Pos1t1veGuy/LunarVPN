@@ -24,8 +24,10 @@ password="admin"
 blacklist="blacklist.txt"
 whitelist="whitelist.txt"
 
-// Type of connection to server (udp, udpPool, tcp, tcpPool). "Pool" is 2-8 connections simultaneously
-connType="udpPool"
+// Type of connection to server (udp, tcp)
+connType="udp"
+// Session connections count (Server may reject an excessively large number of connections; this depends on the server's connection settings)
+connCount=8
 
 // Type of HANDSHAKE encryption. 0: Debug; 1: Xor (use -listLayers to view all)
 defaultLayer=1

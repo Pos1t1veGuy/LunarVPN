@@ -17,7 +17,8 @@ import (
 	"github.com/rs/zerolog/log"
 )
 
-const CurrentVersion = "1.0.8"
+const CurrentVersion = "1.0.9"
+const MaxConnections = 32
 
 var (
 	kernel32 = syscall.NewLazyDLL("kernel32.dll")
@@ -34,11 +35,11 @@ func main() {
 		"warn":  {},
 		"error": {},
 	}
-	validConnTypes := map[string]func() core.Session{
-		"udp":     func() core.Session { return core.NewUdpSession(5 * time.Second) },
-		"udpPool": func() core.Session { return core.NewUdpSessionPool(8, 5*time.Second, 4*time.Second) },
-		//"tcp":     func() core.Session { return core.NewTcpSession(5 * time.Second) },
-		//"tcpPool": func() core.Session { return core.NewTcpSessionPool(8, 5*time.Second, 4*time.Second) },
+	validConnTypes := map[string]func(uint) core.Session{
+		"udp": func(connCount uint) core.Session {
+			return core.NewUdpSessionPool(connCount, 5*time.Second, 4*time.Second)
+		},
+		//"tcp": func(connCount uint) core.Session { return core.NewTcpSessionPool(connCount, 5*time.Second, 4*time.Second) },
 	}
 
 	appHost := flag.String("appHost", "127.0.0.1", "application host")
@@ -48,7 +49,8 @@ func main() {
 	login := flag.String("login", "admin", "user login")
 	password := flag.String("password", "admin", "user password")
 	logLevel := flag.String("logLevel", "info", "application log level (debug, info, warn, error)")
-	connType := flag.String("connType", "udpPool", "type of connection to server (udp, udpPool)")
+	connType := flag.String("connType", "udp", "type of connection to server (udp, tcp (not available))")
+	connCount := flag.Uint("connCount", 8, fmt.Sprintf("session connections count (less than %d)", MaxConnections))
 	defaultLayer := flag.Int(
 		"defaultLayer",
 		1,
@@ -142,6 +144,11 @@ func main() {
 		flag.Usage()
 		os.Exit(1)
 	}
+	if *connCount == 0 || *connCount > MaxConnections {
+		_, _ = fmt.Fprintf(os.Stderr, "invalid connCount: %d\n", *connCount)
+		flag.Usage()
+		os.Exit(1)
+	}
 
 	layersIndexes, err := parseLayers(*layersArg, lrs)
 	if err != nil {
@@ -175,7 +182,7 @@ func main() {
 		os.Exit(1)
 	}
 
-	cl := core.NewWindowsClient(CurrentVersion, *appHost, *appPort, whitelist, blacklist, lrs, validConnTypes[*connType](), *openTunnel)
+	cl := core.NewWindowsClient(CurrentVersion, *appHost, *appPort, whitelist, blacklist, lrs, validConnTypes[*connType](*connCount), *openTunnel)
 	connected := cl.Connect(*serHost, *serPort, *login, *password, layersIndexes, uint8(*defaultLayer))
 	if connected == true {
 		cl.Listen()
