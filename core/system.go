@@ -27,7 +27,7 @@ type Endpoint struct {
 	Port     int
 	FullAddr string
 	CIDR     string
-	Gateway  string
+	Gateway  net.IP
 
 	Net  *net.IPNet
 	Conn *net.UDPConn
@@ -37,9 +37,9 @@ type Endpoint struct {
 	Tunnel     *Tunnel
 }
 
-const projectPrefix = "mvpn/"
+const projectPrefix = "LunarVPN/"
 
-func NewEndpoint(addr string, port int, CIDR, gatewayIP string, iface InterfaceAdapter,
+func NewEndpoint(addr string, port int, CIDR string, gatewayIP net.IP, iface InterfaceAdapter,
 	tunFactory func(destinationIP, netCidr, gatewayIP, IfaceName string, whitelist []string, blacklist []string) *Tunnel,
 ) *Endpoint {
 	_, ipNet, err := net.ParseCIDR(CIDR)
@@ -221,7 +221,14 @@ func (tunnel *Tunnel) Start(interfaceIP string) error {
 		} else { // server
 			// enable NAT
 			ExecCmd("sysctl", "-w", "net.ipv4.ip_forward=1")
+
+			// set masqueradeS
+			ExecCmd("iptables", "-A", "FORWARD", "-i", tunnel.IfaceName, "-o", "eth0", "-j", "ACCEPT")
+			ExecCmd("iptables", "-A", "FORWARD", "-i", "eth0", "-o", tunnel.IfaceName,
+				"-m", "state", "--state", "RELATED,ESTABLISHED", "-j", "ACCEPT")
+
 			ExecCmd("iptables", "-t", "nat", "-A", "POSTROUTING", "-s", tunnel.NetCIDR, "-o", "eth0", "-j", "MASQUERADE")
+
 			// set mss
 			ExecCmd(
 				"iptables", "-t", "mangle", "-A", "FORWARD",
@@ -361,12 +368,12 @@ func (tunnel *Tunnel) Start(interfaceIP string) error {
 				}
 			}
 			// add dns route
-			ExecCmd("netsh", "interface", "ipv4", "set", "dns", fmt.Sprintf(`name="%s"`, tunnel.IfaceName),
-				"static", "8.8.8.8", "register=primary")
-			ExecCmd("route", "add", "8.8.8.8", "mask", "255.255.255.255", tunnel.NetGateway, "metric", "1",
-				"if", strconv.Itoa(curIface.Index))
-			ExecCmd("netsh", "interface", "ipv4", "add", "dns", fmt.Sprintf(`name="%s"`, tunnel.IfaceName),
-				"addr=1.1.1.1", "index=2")
+			//ExecCmd("netsh", "interface", "ipv4", "set", "dns", fmt.Sprintf(`name="%s"`, tunnel.IfaceName),
+			//	"static", "8.8.8.8", "register=primary")
+			//ExecCmd("route", "add", "8.8.8.8", "mask", "255.255.255.255", tunnel.NetGateway, "metric", "1",
+			//	"if", strconv.Itoa(curIface.Index))
+			//ExecCmd("netsh", "interface", "ipv4", "add", "dns", fmt.Sprintf(`name="%s"`, tunnel.IfaceName),
+			//	"addr=1.1.1.1", "index=2")
 		}
 		// set metric to interface
 		ExecCmd("netsh", "interface", "ipv4", "set", "interface", strconv.Itoa(curIface.Index), "metric=1")
@@ -383,21 +390,29 @@ func (tunnel *Tunnel) Stop() {
 	tunnel.State.Store(int32(Closing))
 	switch runtime.GOOS {
 	case "windows":
-		if tunnel.DestinationIP != "" {
+		if tunnel.DestinationIP != "" { // client
 			ExecCmd("route", "delete", tunnel.DestinationIP)
+			for _, addr := range tunnel.Blacklist {
+				ExecCmd("route", "delete", addr)
+			}
+			ExecCmd("route", "delete", "0.0.0.0", "mask", "0.0.0.0", tunnel.NetGateway)
+			ExecCmd("route", "delete", "8.8.8.8", "mask", "255.255.255.255", tunnel.NetGateway)
+			ExecCmd("netsh", "interface", "ipv4", "set", "dns", fmt.Sprintf(`name="%s"`, tunnel.IfaceName), "dhcp")
 		}
-		for _, addr := range tunnel.Blacklist {
-			ExecCmd("route", "delete", addr)
-		}
-		ExecCmd("route", "delete", "0.0.0.0", "mask", "0.0.0.0", tunnel.NetGateway)
-		ExecCmd("route", "delete", "8.8.8.8", "mask", "255.255.255.255", tunnel.NetGateway)
-		ExecCmd("netsh", "interface", "ipv4", "set", "dns", fmt.Sprintf(`name="%s"`, tunnel.IfaceName), "dhcp")
 	case "linux":
-		if tunnel.DestinationIP != "" {
+		if tunnel.DestinationIP == "" { // server
+			ExecCmd("iptables", "-t", "nat", "-D", "POSTROUTING",
+				"-s", tunnel.NetCIDR, "-o", "eth0", "-j", "MASQUERADE")
+			ExecCmd("iptables", "-D", "FORWARD",
+				"-i", tunnel.IfaceName, "-o", "eth0", "-j", "ACCEPT")
+			ExecCmd("iptables", "-D", "FORWARD",
+				"-i", "eth0", "-o", tunnel.IfaceName,
+				"-m", "state", "--state", "RELATED,ESTABLISHED", "-j", "ACCEPT")
+		} else { // client
 			ExecCmd("ip", "route", "del", tunnel.DestinationIP)
-		}
-		for _, addr := range tunnel.Blacklist {
-			ExecCmd("ip", "route", "del", addr)
+			for _, addr := range tunnel.Blacklist {
+				ExecCmd("ip", "route", "del", addr)
+			}
 		}
 	}
 	tunnel.State.Store(int32(Closed))

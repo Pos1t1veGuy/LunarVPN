@@ -66,6 +66,9 @@ func (adapter *WintunAdapter) Read(p []byte) (int, error) {
 }
 
 func (adapter *WintunAdapter) Write(b []byte) (int, error) {
+	if len(b) == 0 {
+		return 0, errors.New("packet is empty")
+	}
 	packet, err := adapter.Session.AllocateSendPacket(len(b))
 	if err != nil {
 		return 0, err
@@ -97,7 +100,7 @@ func NewWindowsClient(version string, addr string, port int, whiteList []string,
 		BlackList:     blackList,
 		LayerChains:   netLayers,
 		Stopping:      make(chan struct{}),
-		Endpoint:      *NewEndpoint(addr, port, "0.0.0.0/0", "0.0.0.0", adapter, NewTunnel),
+		Endpoint:      *NewEndpoint(addr, port, "0.0.0.0/0", net.IPv4zero, adapter, NewTunnel),
 		Session:       session,
 		TunnelOnStart: openTunnel,
 	}

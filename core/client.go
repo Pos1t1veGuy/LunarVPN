@@ -45,14 +45,15 @@ func (client *Client) Connect(addr string, port int, login, password string, lay
 			Msg("Failed to resolve server tcp address")
 	}
 
-	client.VirtualIP, err = client.Session.Open(client, defaultLayer, layersIndexes, login, password)
+	client.VirtualIP, err = client.Session.Open(client.ServerAddr, client.LayerChains, defaultLayer, layersIndexes, login, password)
 	if err != nil {
-		log.Error().
+		log.Fatal().
 			Err(err).
 			Str("state", "listening").
 			Str("serverAddr", client.ServerAddr.String()).
 			Msg("Failed to connect to server")
 	}
+	client.Gateway = client.Session.GetGateway()
 
 	log.Info().
 		Str("state", "connecting").
@@ -60,20 +61,8 @@ func (client *Client) Connect(addr string, port int, login, password string, lay
 		Str("IP", client.VirtualIP.String()).
 		Msg("Client connected to server")
 
-	virtualIP4 := make(net.IP, len(*client.VirtualIP))
-	copy(virtualIP4, *client.VirtualIP)
-	virtualIP4[3] = 0
-	gatewayIP4 := make(net.IP, len(*client.VirtualIP))
-	copy(gatewayIP4, *client.VirtualIP)
-	if (*client.VirtualIP)[3] != 1 {
-		gatewayIP4[3] = 1
-	} else {
-		gatewayIP4[3] = 2
-	}
-
-	client.CIDR = fmt.Sprintf("%s/24", virtualIP4.String())
-	client.Gateway = gatewayIP4.String()
-	client.Tunnel = client.tunFactory(addr, client.CIDR, client.Gateway, client.Interface.Name(), client.WhiteList, client.BlackList)
+	client.CIDR = fmt.Sprintf("%s/16", client.VirtualIP.String())
+	client.Tunnel = client.tunFactory(addr, client.CIDR, client.Gateway.String(), client.Interface.Name(), client.WhiteList, client.BlackList)
 
 	log.Info().
 		Str("state", "connecting").
@@ -161,7 +150,8 @@ func (client *Client) ListenUnsafe() {
 					log.Debug().
 						Int("len", n).
 						Str("state", "N2I").
-						Int("addrType", int(packet.AddrType)).
+						Uint8("PacketType", packet.Type).
+						Bytes("PacketRSV", packet.Rsv[:]).
 						Str("srcIP", packet.SrcIP.String()).
 						Str("dstIP", packet.DstIP.String()).
 						Msg("(Network=>Interface) Got API packet")
@@ -172,14 +162,20 @@ func (client *Client) ListenUnsafe() {
 						Err(err).
 						Str("state", "N2I").
 						Int("len", n).
-						Int("addrType", int(packet.AddrType)).
+						Uint8("PacketType", packet.Type).
+						Bytes("PacketRSV", packet.Rsv[:]).
+						Str("srcIP", packet.SrcIP.String()).
+						Str("dstIP", packet.DstIP.String()).
 						Msg("(Network=>Interface) Cannot send packet")
 					continue
 				}
 				log.Debug().
 					Str("state", "N2I").
-					Int("len", n).
-					Int("addrType", int(packet.AddrType)).
+					Uint8("PacketType", packet.Type).
+					Bytes("PacketRSV", packet.Rsv[:]).
+					Str("srcIP", packet.SrcIP.String()).
+					Str("dstIP", packet.DstIP.String()).
+					Bytes("PacketData", packet.Data).
 					Msg("(Network=>Interface) Sent a packet")
 			case 6:
 				continue
@@ -239,7 +235,10 @@ func (client *Client) ListenUnsafe() {
 							Err(err).
 							Str("state", "I2N").
 							Int("len", n).
-							Int("addrType", int(packet.AddrType)).
+							Uint8("PacketType", packet.Type).
+							Bytes("PacketRSV", packet.Rsv[:]).
+							Str("srcIP", packet.SrcIP.String()).
+							Str("dstIP", packet.DstIP.String()).
 							Msg("(Network<=Interface) Failed to marshal packet")
 						continue
 					}
@@ -248,14 +247,20 @@ func (client *Client) ListenUnsafe() {
 							Err(err).
 							Str("state", "I2N").
 							Int("len", n).
-							Int("addrType", int(packet.AddrType)).
+							Uint8("PacketType", packet.Type).
+							Bytes("PacketRSV", packet.Rsv[:]).
+							Str("srcIP", packet.SrcIP.String()).
+							Str("dstIP", packet.DstIP.String()).
 							Msg("(Network<=Interface) Failed to send packet")
 						continue
 					}
 					log.Debug().
 						Str("state", "I2N").
 						Int("len", n).
-						Int("addrType", int(packet.AddrType)).
+						Uint8("PacketType", packet.Type).
+						Bytes("PacketRSV", packet.Rsv[:]).
+						Str("srcIP", packet.SrcIP.String()).
+						Str("dstIP", packet.DstIP.String()).
 						Msg("(Network<=Interface) Sent a packet")
 				}
 
@@ -269,8 +274,8 @@ func (client *Client) ListenUnsafe() {
 	}, true)
 
 	<-client.Stopping
-	packet, err := MakeDisconnectPacket(client.ServerAddr.IP, client.IP)
-	if err != nil {
+	packet, err := MakeDisconnectPacket(client.Gateway, client.IP)
+	if err == nil {
 		client.SendPacket(packet)
 	}
 }

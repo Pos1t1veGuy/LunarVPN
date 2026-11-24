@@ -94,7 +94,7 @@ func (server *Server) StartUnsafe(defaultLayer uint8) {
 			Str("CIDR", server.CIDR).
 			Msg("Failed to parse CIDR")
 	}
-	server.Tunnel = server.tunFactory("", server.CIDR, server.Gateway, "gotun0", []string{}, []string{})
+	server.Tunnel = server.tunFactory("", server.CIDR, server.Gateway.String(), "gotun0", []string{}, []string{})
 
 	udpAddr, err := net.ResolveUDPAddr("udp", server.FullAddr)
 	if err != nil {
@@ -166,7 +166,7 @@ func (server *Server) StartUnsafe(defaultLayer uint8) {
 	server.MakeInterfacePipe()
 	server.MakeUdpPipe(defaultLayer)
 	server.ListenAndServeTCP(defaultLayer)
-	go server.PingLoop()
+	//go server.PingLoop() // TODO: пинг сломался и сервер дисконнектит подключенного клиента
 	go server.PeerViewLoop()
 	<-sigs // waiting for Ctrl+C
 }
@@ -181,7 +181,7 @@ func (server *Server) Stop() {
 
 	for _, peer := range server.Peers {
 		if peer != nil && peer.Addr != nil {
-			packet, err := MakeDisconnectPacket(server.IP, peer.VirtualIP)
+			packet, err := MakeDisconnectPacket(server.Gateway, peer.VirtualIP)
 			if err != nil {
 				server.SendPacket(packet, peer)
 			}
@@ -292,24 +292,27 @@ func (server *Server) PingLoop() {
 		for _, peer := range server.Peers {
 			if time.Since(peer.LastSeen) >= server.PeerTimeout {
 				toRemove = append(toRemove, peer)
-			} else {
-				pingPacket, err := MakePingPacket(peer.VirtualIP, server.IP)
+				pingPacket, err := MakePingPacket(server.Gateway, peer.VirtualIP)
 				if err != nil {
 					log.Error().
 						Str("state", "pingLoop").
 						Err(err).
 						Str("peer", peer.Addr.String()).
-						Msg("Failed to make ping packet")
+						Msg("Failed to make a PING packet")
+					continue
 				}
 				go server.SendPacket(pingPacket, peer)
 			}
 		}
 		server.mu.Unlock()
 
-		for _, peer := range toRemove {
-			_ = server.DisconnectPeer(peer)
-		}
 		time.Sleep(server.PingDuration)
+
+		for _, peer := range toRemove {
+			if time.Since(peer.LastSeen) >= server.PeerTimeout {
+				_ = server.DisconnectPeer(peer)
+			}
+		}
 	}
 }
 
@@ -361,7 +364,7 @@ func (server *Server) MakeUdpPipe(authLayer uint8) {
 		defer server.wg.Done()
 
 		buf := make([]byte, 1500)
-		pipe := fmt.Sprintf("(%s=>Interface) ", pipeType)
+		pipe := "(Peer=>Interface) "
 		var packet *Packet
 		var unwrapped []byte
 		var peerAddr *net.UDPAddr
@@ -400,8 +403,8 @@ func (server *Server) MakeUdpPipe(authLayer uint8) {
 				if err != nil || !peer.Handshaked {
 					log.Error().
 						Err(err).
+						Str("state", "P2I").
 						Int("len", n).
-						Str("state", "U2I").
 						Int("addrType", version).
 						Str("peerAddr", peerAddrStr).
 						Msg(pipe + "Handshake failed")
@@ -412,8 +415,8 @@ func (server *Server) MakeUdpPipe(authLayer uint8) {
 				server.mu.Unlock()
 
 				log.Info().
+					Str("state", "P2I").
 					Int("len", n).
-					Str("state", "U2I").
 					Int("addrType", version).
 					Str("peerRealAddr", peerAddrStr).
 					Str("peerVirtualIP", peer.VirtualIP.String()).
@@ -425,8 +428,8 @@ func (server *Server) MakeUdpPipe(authLayer uint8) {
 			if err != nil {
 				log.Debug().
 					Err(err).
+					Str("state", "P2I").
 					Int("len", n).
-					Str("state", "U2I").
 					Int("addrType", version).
 					Msg(pipe + "Failed to unwrap packet")
 				continue
@@ -436,7 +439,7 @@ func (server *Server) MakeUdpPipe(authLayer uint8) {
 				log.Debug().
 					Err(err).
 					Int("len", n).
-					Str("state", "U2I").
+					Str("state", "P2I").
 					Int("addrType", version).
 					Msg(pipe + "Failed to marshal packet")
 				continue
@@ -446,9 +449,10 @@ func (server *Server) MakeUdpPipe(authLayer uint8) {
 			server.mu.Unlock()
 			if server.PacketAPI(server.Conn, peer, packet) {
 				log.Debug().
+					Str("state", "P2I").
 					Int("len", n).
-					Str("state", "U2I").
-					Int("addrType", version).
+					Uint8("PacketType", packet.Type).
+					Bytes("PacketRSV", packet.Rsv[:]).
 					Str("srcIP", packet.SrcIP.String()).
 					Str("dstIP", packet.DstIP.String()).
 					Msg(pipe + "Got API packet")
@@ -457,9 +461,10 @@ func (server *Server) MakeUdpPipe(authLayer uint8) {
 			if _, err = server.Interface.Write(packet.Data); err != nil {
 				log.Debug().
 					Err(err).
+					Str("state", "P2I").
 					Int("len", n).
-					Str("state", "U2I").
-					Int("addrType", version).
+					Uint8("PacketType", packet.Type).
+					Bytes("PacketRSV", packet.Rsv[:]).
 					Str("srcIP", packet.SrcIP.String()).
 					Str("dstIP", packet.DstIP.String()).
 					Msg(pipe + "Failed to send packet")
@@ -467,9 +472,10 @@ func (server *Server) MakeUdpPipe(authLayer uint8) {
 			}
 
 			log.Debug().
+				Str("state", "P2I").
 				Int("len", n).
-				Str("state", "U2I").
-				Int("addrType", version).
+				Uint8("PacketType", packet.Type).
+				Bytes("PacketRSV", packet.Rsv[:]).
 				Str("srcIP", packet.SrcIP.String()).
 				Str("dstIP", packet.DstIP.String()).
 				Msg(pipe + "Sent a packet")
@@ -482,7 +488,7 @@ func (server *Server) MakeUdpPipe(authLayer uint8) {
 
 func (server *Server) MakeTcpPipe(authLayer uint8, peer *Peer) {
 	pipeType := "TCP"
-	pipe := fmt.Sprintf("(%s=>Interface) ", pipeType)
+	pipe := "(Peer=>Interface) "
 	peer.tcpBuffer = make([]byte, 0)
 
 	readBuf := make([]byte, 4096)
@@ -501,7 +507,7 @@ func (server *Server) MakeTcpPipe(authLayer uint8, peer *Peer) {
 			if err != nil {
 				log.Debug().
 					Err(err).
-					Str("state", "T2I").
+					Str("state", "P2I").
 					Str("peer", peer.Addr.String()).
 					Msg(pipe + "Сonnection closed")
 				return
@@ -517,7 +523,7 @@ func (server *Server) MakeTcpPipe(authLayer uint8, peer *Peer) {
 				if bytes.Err != nil {
 					log.Warn().
 						Err(bytes.Err).
-						Str("state", "T2I").
+						Str("state", "P2I").
 						Str("peer", peer.Addr.String()).
 						Msg("Protocol error")
 					return
@@ -542,7 +548,7 @@ func (server *Server) MakeTcpPipe(authLayer uint8, peer *Peer) {
 					server.mu.Unlock()
 
 					log.Info().
-						Str("state", "T2I").
+						Str("state", "P2I").
 						Str("peerRealAddr", peer.Addr.String()).
 						Str("peerVirtualIP", peer.VirtualIP.String()).
 						Msg(pipe + "Handshake success")
@@ -552,7 +558,7 @@ func (server *Server) MakeTcpPipe(authLayer uint8, peer *Peer) {
 				if err != nil {
 					log.Debug().
 						Err(err).
-						Str("state", "T2I").
+						Str("state", "P2I").
 						Str("peer", peer.Addr.String()).
 						Msg(pipe + "Failed to unwrap packet")
 					continue
@@ -561,7 +567,7 @@ func (server *Server) MakeTcpPipe(authLayer uint8, peer *Peer) {
 				if err != nil {
 					log.Debug().
 						Err(err).
-						Str("state", "T2I").
+						Str("state", "P2I").
 						Str("peer", peer.Addr.String()).
 						Str("srcIP", packet.SrcIP.String()).
 						Str("dstIP", packet.DstIP.String()).
@@ -573,8 +579,10 @@ func (server *Server) MakeTcpPipe(authLayer uint8, peer *Peer) {
 					if _, err := server.Interface.Write(packet.Data); err != nil {
 						log.Debug().
 							Err(err).
-							Str("state", "T2I").
+							Str("state", "P2I").
 							Str("peer", peer.Addr.String()).
+							Uint8("PacketType", packet.Type).
+							Bytes("PacketRSV", packet.Rsv[:]).
 							Str("srcIP", packet.SrcIP.String()).
 							Str("dstIP", packet.DstIP.String()).
 							Msg(pipe + "Failed to write to Interface")
@@ -584,8 +592,10 @@ func (server *Server) MakeTcpPipe(authLayer uint8, peer *Peer) {
 					}
 				} else {
 					log.Debug().
-						Str("state", "T2I").
+						Str("state", "P2I").
 						Str("peer", peer.Addr.String()).
+						Uint8("PacketType", packet.Type).
+						Bytes("PacketRSV", packet.Rsv[:]).
 						Str("srcIP", packet.SrcIP.String()).
 						Str("dstIP", packet.DstIP.String()).
 						Msg(pipe + "Got API packet")
@@ -640,7 +650,7 @@ func (server *Server) ListenAndServeTCP(authLayer uint8) {
 }
 
 func (server *Server) DisconnectPeer(peer *Peer) (err error) {
-	packet, err := MakeDisconnectPacket(server.IP, peer.VirtualIP)
+	packet, err := MakeDisconnectPacket(server.Gateway, peer.VirtualIP)
 	if err != nil {
 		log.Error().
 			Err(err).
@@ -680,6 +690,7 @@ func (server *Server) DisconnectAll() {
 }
 
 type Network struct {
+	mu        sync.Mutex
 	Used      map[string]struct{}
 	Current   uint32
 	MaxLength uint
@@ -696,16 +707,43 @@ func NewNetwork(cidr string) (*Network, error) {
 		return nil, err
 	}
 
+	ip4 := ip.To4()
+	if ip4 == nil {
+		return nil, fmt.Errorf("only IPv4 is supported")
+	}
+	ones, bits := network.Mask.Size()
+	if bits != 32 {
+		return nil, fmt.Errorf("only IPv4 is supported")
+	}
+	if ones > 30 {
+		return nil, fmt.Errorf("subnet /%d is too small", ones)
+	}
 	networkBits := binary.BigEndian.Uint32(network.IP.To4())
-	ipBits := binary.BigEndian.Uint32(ip.To4())
 	maskBits := binary.BigEndian.Uint32(network.Mask)
 	broadcast := networkBits | (^maskBits)
 
-	ones, _ := network.Mask.Size()
 	maxLen := 1<<(32-ones) - 2
+	ipBits := binary.BigEndian.Uint32(ip.To4())
 
-	if ip[3] == 0 {
-		ip[3] = 2
+	used := map[string]struct{}{
+		intToIP(networkBits).String(): {},
+		intToIP(broadcast).String():   {},
+	}
+
+	var gatewayBits uint32
+	if ipBits == networkBits {
+		gatewayBits = networkBits + 1
+	} else {
+		gatewayBits = ipBits
+	}
+	if gatewayBits == networkBits || gatewayBits == broadcast {
+		return nil, fmt.Errorf("invalid gateway address %s in CIDR %s", intToIP(gatewayBits), cidr)
+	}
+	used[intToIP(gatewayBits).String()] = struct{}{}
+
+	startBits := gatewayBits + 1
+	if startBits > broadcast {
+		startBits = networkBits + 2
 	}
 
 	return &Network{
@@ -720,11 +758,10 @@ func NewNetwork(cidr string) (*Network, error) {
 }
 
 func (network *Network) Next() (net.IP, error) {
-	for {
-		if len(network.Used) >= int(network.MaxLength) {
-			return nil, fmt.Errorf("no free IPs left")
-		}
+	network.mu.Lock()
+	defer network.mu.Unlock()
 
+	for i := 0; i < int(network.MaxLength)+2; i++ {
 		currentIP := intToIP(network.Current)
 		ipStr := currentIP.String()
 		if _, exists := network.Used[ipStr]; !exists {
@@ -732,17 +769,15 @@ func (network *Network) Next() (net.IP, error) {
 			network.increment()
 			return currentIP, nil
 		}
-
 		network.increment()
-		time.Sleep(1 * time.Millisecond)
 	}
+
+	return nil, fmt.Errorf("no free IPs left in %s", network.IPNet.String())
 }
 
 func (network *Network) increment() {
-	hostPart := (network.Current + 1) & (^network.MaskBits)
-	network.Current = network.NetworkBits | hostPart
-
-	if network.Current > network.BroadcastBits {
+	network.Current++
+	if network.Current >= network.BroadcastBits || network.Current == network.NetworkBits {
 		network.Current = network.NetworkBits + 1
 	}
 }
